@@ -1,0 +1,52 @@
+APP_TITILE: External Application
+APP_VERSION: 1.0.1
+
+# Base de données - Port modifié pour éviter le conflit
+POSTGRES_HOST: 127.0.0.1
+POSTGRES_PORT: 5333  # Changé de 5332 à 5333
+POSTGRES_DATABASE: externaldb
+POSTGRES_USERNAME: external2711
+POSTGRES_PASSWORD: external2711
+
+# OAuth2/JWT Configuration
+JWT_SECRET: mysecurecanalsecret
+JWT_ISSUER: external-api-dev
+JWT_EXPIRATION_MINUTES: 60
+JWT_REFRESH_EXPIRATION_DAYS: 7
+
+# Server Configuration
+CONTAINER_PORT: 8090
+ACTIVE_PROFILE: dev
+
+# Orange API Configuration
+ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
+ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests
+ORANGE_BALANCE_URL: https://api.orange.com/sms/admin/v1/contracts
+ORANGE_CLIENT_CREDENTIALS: VExqQ1BlQ1ZDdUxTRURLUjc2Z0RZcXo5QWw4a3h5M3A6bVV6Y0tsTHhRdkp1Z1lpTWN2UFdjT2lMN3ppc3RSdDFCRjVvajIxNEwxRGs=
+ORANGE_SENDER: tel:+224622459305
+
+# Email Configuration
+EMAIL_HOST: smtp.gmail.com
+EMAIL_PORT: 587
+EMAIL_ID: douklifsa93@gmail.com
+EMAIL_PASSWORD: uppv zody hnsl bbzu
+
+# Canal Configuration
+APP_CANAL_USERNAME: FDIOUBATE54645
+APP_CANAL_PASSWORD: Konateba@2020
+
+# Selenium Configuration
+SELENIUM_REMOTE_URL:
+CHROME_REMOTE_ENABLED: false
+
+# SMS Configuration
+CODE_LIMIT: 6
+EXPIRY_MINUTE: 10
+MAX_ATTEMPT: 3
+LIMIT_PER_HOUR: 3
+SENDER_NAME: SMS 335524
+SESSION_DURATION_DAY: 10
+SMS_PRIMARY_PROVIDER: orange
+
+# Slack Configuration
+SLACK_CREDENTIAL: https://hooks.slack.com/services/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

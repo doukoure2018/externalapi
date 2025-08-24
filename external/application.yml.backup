@@ -1,0 +1,133 @@
+application:
+  title: ${APP_TITILE}
+  version: ${APP_VERSION}
+
+jwt:
+  secret: ${JWT_SECRET}
+
+server:
+  error:
+    path: /user/error
+    whitelabel:
+      enabled: false
+  address: 0.0.0.0
+  port: ${CONTAINER_PORT:8090}
+
+spring:
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 10MB
+      resolve-lazily: true
+  profiles:
+    active: ${ACTIVE_PROFILE:dev}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DATABASE}
+    password: ${POSTGRES_PASSWORD}
+    username: ${POSTGRES_USERNAME}
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    generate-ddl: true
+    show-sql: true
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        globally_quoted_indentifiers: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  sql:
+    init:
+      mode: never
+      continue-on-error: false
+  mail:
+    host: ${EMAIL_HOST}
+    port: ${EMAIL_PORT}
+    username: ${EMAIL_ID}
+    password: ${EMAIL_PASSWORD}
+    properties:
+      mail:
+        smtp:
+          writetimeout: 5000
+          connectiontimeout: 5000
+          timeout: 5000
+          auth: true
+          starttls:
+            enable: true
+            required: true
+
+  flyway:
+    baseline-on-migrate: true
+
+canal:
+  login:
+    username: ${APP_CANAL_USERNAME}
+    password: ${APP_CANAL_PASSWORD}
+
+selenium:
+  remote:
+    url: ${SELENIUM_REMOTE_URL:}
+
+chrome:
+  remote:
+    enabled: ${CHROME_REMOTE_ENABLED:false}
+
+
+orange:
+  api:
+    oauth:
+      url: ${ORANGE_OAUTH_URL}
+    sms:
+      url: ${ORANGE_OAUTH_URL_SMS}
+      balance:
+        url: ${ORANGE_BALANCE_URL}
+    client:
+      credentials: Basic ${ORANGE_CLIENT_CREDENTIALS}
+    sender:
+      address: ${ORANGE_SENDER}
+
+
+sms:
+  code:
+    length: ${CODE_LIMIT:6}
+  expiry:
+    minutes: ${EXPIRY_MINUTE:10}
+  max:
+    attempts: ${MAX_ATTEMPT:3}
+  rate:
+    limit:
+      per:
+        hour: ${LIMIT_PER_HOUR:3}
+  sender:
+    name: ${SENDER_NAME}
+  primary:
+    provider: ${SMS_PRIMARY_PROVIDER}
+  fallback:
+    enabled: true
+  send:
+    timeout:
+      seconds: 30
+  retry:
+    attempts: 2
+
+# Métriques et monitoring
+management:
+  metrics:
+    export:
+      mobile-sessions:
+        enabled: true
+        step: 1m
+
+# Configuration de logging spécifique
+logging:
+  level:
+    io.canal.dist.service.SMSAuthService: DEBUG
+    io.canal.dist.controller.SMSAuthController: DEBUG
+    io.canal.dist.job.MobileSessionCleanupJob: INFO
+
+slack:
+  credential: ${SLACK_CREDENTIAL}
+
+
+

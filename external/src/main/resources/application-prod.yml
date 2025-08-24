@@ -1,0 +1,52 @@
+APP_TITILE: External Application
+APP_VERSION: 1.0.1
+
+# Base de données - En production, utilisez les bonnes valeurs
+POSTGRES_HOST: postgres-external  # Nom du container en production
+POSTGRES_PORT: 5432
+POSTGRES_DATABASE: externaldb
+POSTGRES_USERNAME: external2711
+POSTGRES_PASSWORD: external2711  # ⚠️ Changez ce mot de passe en production réelle !
+
+# OAuth2/JWT Configuration
+JWT_SECRET: ${JWT_SECRET_PROD:change-this-secret-in-real-production-minimum-256-bits}  # ⚠️ À changer !
+JWT_ISSUER: external-api-prod
+JWT_EXPIRATION_MINUTES: 30  # Plus court en prod
+JWT_REFRESH_EXPIRATION_DAYS: 3  # Plus court en prod
+
+# Server Configuration
+CONTAINER_PORT: 8090
+ACTIVE_PROFILE: prod
+
+# Orange API Configuration
+ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
+ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests
+ORANGE_BALANCE_URL: https://api.orange.com/sms/admin/v1/contracts
+ORANGE_CLIENT_CREDENTIALS: VExqQ1BlQ1ZDdUxTRURLUjc2Z0RZcXo5QWw4a3h5M3A6bVV6Y0tsTHhRdkp1Z1lpTWN2UFdjT2lMN3ppc3RSdDFCRjVvajIxNEwxRGs=
+ORANGE_SENDER: tel:+224622459305
+
+# Email Configuration
+EMAIL_HOST: smtp.gmail.com
+EMAIL_PORT: 587
+EMAIL_ID: douklifsa93@gmail.com
+EMAIL_PASSWORD: uppv zody hnsl bbzu
+
+# Canal Configuration
+APP_CANAL_USERNAME: FDIOUBATE54645
+APP_CANAL_PASSWORD: Konateba@2020
+
+# Selenium Configuration (activé en production avec Docker)
+SELENIUM_REMOTE_URL: http://chrome-selenium:4444/wd/hub
+CHROME_REMOTE_ENABLED: true
+
+# SMS Configuration
+CODE_LIMIT: 6
+EXPIRY_MINUTE: 10
+MAX_ATTEMPT: 3
+LIMIT_PER_HOUR: 3
+SENDER_NAME: SMS 335524
+SESSION_DURATION_DAY: 10
+SMS_PRIMARY_PROVIDER: orange
+
+# Slack Configuration
+SLACK_CREDENTIAL: https://hooks.slack.com/services/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
