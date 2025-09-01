@@ -308,7 +308,7 @@ jobs:
             echo "📜 Recent API logs:"
             docker-compose logs --tail=30 external-api
             
-            echo "✅ Deployment completed!
+            echo "✅ Deployment completed!"
 
       - name: Health check
         run: |
