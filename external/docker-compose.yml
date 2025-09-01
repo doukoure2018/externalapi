@@ -86,7 +86,7 @@ services:
       SMS_PRIMARY_PROVIDER: orange
 
       # Slack
-      SLACK_CREDENTIAL: https://hooks.slack.com/services/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
+      SLACK_CREDENTIAL: ${SLACK_WEBHOOK_URL}
 
       # Profile
       ACTIVE_PROFILE: dev
