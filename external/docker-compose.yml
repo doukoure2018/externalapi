@@ -70,10 +70,6 @@ services:
       EMAIL_ID: douklifsa93@gmail.com
       EMAIL_PASSWORD: "uppv zody hnsl bbzu"
 
-      # Canal
-      APP_CANAL_USERNAME: FDIOUBATE54645
-      APP_CANAL_PASSWORD: Konateba@2020
-
       # Orange API
       ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
       ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests

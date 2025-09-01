@@ -9,7 +9,7 @@ POSTGRES_USERNAME: external2711
 POSTGRES_PASSWORD: external2711  # ⚠️ Changez ce mot de passe en production réelle !
 
 # OAuth2/JWT Configuration
-JWT_SECRET: ${JWT_SECRET_PROD:change-this-secret-in-real-production-minimum-256-bits}  # ⚠️ À changer !
+JWT_SECRET: ${JWT_SECRET_PROD}  # ⚠️ À changer !
 JWT_ISSUER: external-api-prod
 JWT_EXPIRATION_MINUTES: 30  # Plus court en prod
 JWT_REFRESH_EXPIRATION_DAYS: 3  # Plus court en prod
@@ -31,9 +31,6 @@ EMAIL_PORT: 587
 EMAIL_ID: douklifsa93@gmail.com
 EMAIL_PASSWORD: uppv zody hnsl bbzu
 
-# Canal Configuration
-APP_CANAL_USERNAME: FDIOUBATE54645
-APP_CANAL_PASSWORD: Konateba@2020
 
 # Selenium Configuration (activé en production avec Docker)
 SELENIUM_REMOTE_URL: http://chrome-selenium:4444/wd/hub
@@ -49,4 +46,4 @@ SESSION_DURATION_DAY: 10
 SMS_PRIMARY_PROVIDER: orange
 
 # Slack Configuration
-SLACK_CREDENTIAL: https://hooks.slack.com/services/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
+SLACK_CREDENTIAL: https://hooks.slack.com/services/T07

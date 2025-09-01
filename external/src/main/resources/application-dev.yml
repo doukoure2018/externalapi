@@ -31,9 +31,6 @@ EMAIL_PORT: 587
 EMAIL_ID: douklifsa93@gmail.com
 EMAIL_PASSWORD: uppv zody hnsl bbzu
 
-# Canal Configuration
-APP_CANAL_USERNAME: FDIOUBATE54645
-APP_CANAL_PASSWORD: Konateba@2020
 
 # Selenium Configuration
 SELENIUM_REMOTE_URL:
@@ -49,4 +46,4 @@ SESSION_DURATION_DAY: 10
 SMS_PRIMARY_PROVIDER: orange
 
 # Slack Configuration
-SLACK_CREDENTIAL: https://hooks.slack.com/services/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
+SLACK_CREDENTIAL: https://hooks.slack.com/serv

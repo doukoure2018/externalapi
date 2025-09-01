@@ -1,0 +1,340 @@
+name: CD - Deploy External API to OVH
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - external/**
+      - .github/workflows/backend-cd.yml
+      - Dockerfile
+      - docker-compose.yml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Build with Maven
+        working-directory: ./external
+        run: |
+          mvn clean package -DskipTests
+          ls -la target/
+
+      - name: Docker Hub login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Generate build tag
+        id: build-number
+        run: echo "BUILD_NUMBER=$(date '+%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        run: |
+          # Build Docker image using your Dockerfile
+          docker build -t doukoure93/external-api:${{ steps.build-number.outputs.BUILD_NUMBER }} \
+                       -t doukoure93/external-api:latest \
+                       -f Dockerfile \
+                       ./external
+          
+          # Push both tags
+          docker push doukoure93/external-api:${{ steps.build-number.outputs.BUILD_NUMBER }}
+          docker push doukoure93/external-api:latest
+
+      - name: Deploy to OVH server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 51.83.40.55
+          username: ubuntu
+          key: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            
+            echo "🚀 Starting deployment on OVH..."
+            
+            # Variables
+            IMAGE_TAG="${{ steps.build-number.outputs.BUILD_NUMBER }}"
+            
+            # Create application directory
+            mkdir -p /home/ubuntu/external-api
+            cd /home/ubuntu/external-api
+            
+            # Stop and remove old containers
+            echo "🧹 Cleaning up old containers..."
+            docker-compose down || true
+            docker system prune -f
+            
+            # Create docker-compose.yml for production
+            cat << 'EOF' > docker-compose.yml
+            version: '3.8'
+            
+            services:
+              postgres-external:
+                container_name: postgres-external
+                image: postgres:17.2
+                environment:
+                  POSTGRES_USER: external2711
+                  POSTGRES_PASSWORD: external2711
+                  POSTGRES_DB: externaldb
+                  PGDATA: /var/lib/postgresql/data
+                volumes:
+                  - postgres-data:/var/lib/postgresql/data
+                ports:
+                  - "5432:5432"
+                networks:
+                  - external-network
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD-SHELL", "pg_isready -U external2711 -d externaldb"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+            
+              chrome-selenium:
+                container_name: chrome-selenium
+                image: selenium/standalone-chrome:114.0
+                shm_size: '2gb'
+                environment:
+                  SE_NODE_SESSION_TIMEOUT: 600
+                  SE_SESSION_REQUEST_TIMEOUT: 600
+                  SE_SESSION_RETRY_INTERVAL: 5
+                  SE_NODE_MAX_SESSIONS: 3
+                  SE_VNC_NO_PASSWORD: 1
+                  SE_SCREEN_WIDTH: 1920
+                  SE_SCREEN_HEIGHT: 1080
+                  SE_OPTS: "--log-level INFO"
+                  JAVA_OPTS: "-Xmx1g -Xms256m"
+                ports:
+                  - "4444:4444"
+                  - "7900:7900"
+                networks:
+                  - external-network
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
+                  interval: 15s
+                  timeout: 10s
+                  retries: 5
+                  start_period: 30s
+            
+              external-api:
+                container_name: external-api
+                image: doukoure93/external-api:${IMAGE_TAG}
+                environment:
+                  # Spring Profile
+                  SPRING_PROFILES_ACTIVE: prod
+            
+                  # Database Configuration
+                  POSTGRES_HOST: postgres-external
+                  POSTGRES_PORT: 5432
+                  POSTGRES_DATABASE: externaldb
+                  POSTGRES_USERNAME: external2711
+                  POSTGRES_PASSWORD: external2711
+            
+                  # Selenium Configuration
+                  SELENIUM_REMOTE_URL: http://chrome-selenium:4444/wd/hub
+                  CHROME_REMOTE_ENABLED: "true"
+            
+                  # Application Configuration
+                  APP_TITILE: "External Application"
+                  APP_VERSION: "1.0.1"
+                  JWT_SECRET: "${JWT_SECRET}"
+                  CONTAINER_PORT: 8090
+                  ACTIVE_PROFILE: prod
+            
+                  # Canal Credentials
+                  APP_CANAL_USERNAME: "${APP_CANAL_USERNAME}"
+                  APP_CANAL_PASSWORD: "${APP_CANAL_PASSWORD}"
+            
+                  # Email Configuration
+                  EMAIL_HOST: smtp.gmail.com
+                  EMAIL_PORT: 587
+                  EMAIL_ID: "${EMAIL_ID}"
+                  EMAIL_PASSWORD: "${EMAIL_PASSWORD}"
+            
+                  # Orange API Configuration
+                  ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
+                  ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests
+                  ORANGE_BALANCE_URL: https://api.orange.com/sms/admin/v1/contracts
+                  ORANGE_CLIENT_CREDENTIALS: "${ORANGE_CLIENT_CREDENTIALS}"
+                  ORANGE_SENDER: "tel:+224622459305"
+            
+                  # SMS Configuration
+                  CODE_LIMIT: 6
+                  EXPIRY_MINUTE: 10
+                  MAX_ATTEMPT: 3
+                  LIMIT_PER_HOUR: 3
+                  SENDER_NAME: "SMS 335524"
+                  SESSION_DURATION_DAY: 10
+                  SMS_PRIMARY_PROVIDER: orange
+            
+                  # Slack Configuration
+                  SLACK_CREDENTIAL: "${SLACK_CREDENTIAL}"
+            
+                  # JVM Options
+                  JAVA_OPTS: "-Xmx512m -Xms256m -XX:+UseG1GC"
+                ports:
+                  - "8090:8090"
+                networks:
+                  - external-network
+                depends_on:
+                  postgres-external:
+                    condition: service_healthy
+                  chrome-selenium:
+                    condition: service_healthy
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "curl", "-f", "http://localhost:8090/actuator/health"]
+                  interval: 30s
+                  timeout: 10s
+                  retries: 3
+                  start_period: 60s
+            
+              nginx:
+                container_name: nginx-proxy
+                image: nginx:alpine
+                ports:
+                  - "80:80"
+                volumes:
+                  - ./nginx.conf:/etc/nginx/nginx.conf:ro
+                networks:
+                  - external-network
+                depends_on:
+                  - external-api
+                restart: unless-stopped
+            
+            networks:
+              external-network:
+                driver: bridge
+            
+            volumes:
+              postgres-data:
+                driver: local
+            EOF
+            
+            # Create nginx configuration
+            cat << 'EOF' > nginx.conf
+            events {
+                worker_connections 1024;
+            }
+            
+            http {
+                upstream external-api {
+                    server external-api:8090;
+                }
+            
+                server {
+                    listen 80;
+                    server_name 51.83.40.55;
+                    client_max_body_size 10M;
+            
+                    location / {
+                        proxy_pass http://external-api;
+                        proxy_set_header Host $host;
+                        proxy_set_header X-Real-IP $remote_addr;
+                        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                        proxy_set_header X-Forwarded-Proto $scheme;
+                        proxy_connect_timeout 60s;
+                        proxy_send_timeout 60s;
+                        proxy_read_timeout 60s;
+                    }
+            
+                    location /actuator {
+                        proxy_pass http://external-api/actuator;
+                        proxy_set_header Host $host;
+                    }
+                }
+            }
+            EOF
+            
+            # Create .env file with secrets
+            cat << EOF > .env
+            IMAGE_TAG=$IMAGE_TAG
+            JWT_SECRET=${{ secrets.JWT_SECRET_PROD }}
+            APP_CANAL_USERNAME=${{ secrets.APP_CANAL_USERNAME }}
+            APP_CANAL_PASSWORD=${{ secrets.APP_CANAL_PASSWORD }}
+            EMAIL_ID=${{ secrets.EMAIL_ID }}
+            EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
+            ORANGE_CLIENT_CREDENTIALS=${{ secrets.ORANGE_CLIENT_CREDENTIALS }}
+            SLACK_CREDENTIAL=${{ secrets.SLACK_CREDENTIAL }}
+            EOF
+            
+            # Pull the new image
+            echo "📦 Pulling new Docker image..."
+            docker pull doukoure93/external-api:$IMAGE_TAG
+            
+            # Start all services
+            echo "🚀 Starting services..."
+            docker-compose up -d
+            
+            # Wait for services to be ready
+            echo "⏳ Waiting for services to start..."
+            sleep 40
+            
+            # Check services status
+            echo "📊 Services status:"
+            docker-compose ps
+            
+            # Show logs for debugging
+            echo "📜 Recent API logs:"
+            docker-compose logs --tail=30 external-api
+            
+            echo "✅ Deployment completed!"
+
+      - name: Health check
+        run: |
+          echo "🏥 Running health checks..."
+          sleep 20
+          
+          # Check if API is responding
+          max_attempts=10
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt/$max_attempts..."
+          
+            if curl -f -s -o /dev/null -w "%{http_code}" http://51.83.40.55/actuator/health | grep -q "200"; then
+              echo "✅ API is healthy and responding!"
+              curl http://51.83.40.55/actuator/health | jq '.' || true
+              break
+            else
+              echo "⏳ API not ready yet, waiting..."
+              sleep 10
+              attempt=$((attempt + 1))
+            fi
+          done
+          
+          if [ $attempt -gt $max_attempts ]; then
+            echo "❌ API health check failed after $max_attempts attempts"
+            exit 1
+          fi
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":":white_check_mark: External API deployed successfully to OVH!\n:globe_with_meridians: API: http://51.83.40.55\n:port: Direct: http://51.83.40.55:8090\n:selenium: Selenium: http://51.83.40.55:4444\n:tv: VNC: http://51.83.40.55:7900\n:label: Version: ${{ steps.build-number.outputs.BUILD_NUMBER }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }} || echo "Slack notification failed"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":":x: External API deployment to OVH failed!\n:mag: Check logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }} || echo "Slack notification failed"
