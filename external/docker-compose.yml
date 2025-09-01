@@ -15,92 +15,92 @@ services:
       - external-network
     restart: unless-stopped
 
-  chrome-selenium:
-    image: selenium/standalone-chrome:114.0
-    container_name: chrome-selenium
-    shm_size: '2gb'
-    environment:
-      - SE_NODE_SESSION_TIMEOUT=600
-      - SE_SESSION_REQUEST_TIMEOUT=600
-      - SE_SESSION_RETRY_INTERVAL=5
-      - SE_NODE_MAX_SESSIONS=3
-      - SE_VNC_NO_PASSWORD=1
-      - SE_SCREEN_WIDTH=1920
-      - SE_SCREEN_HEIGHT=1080
-      - SE_OPTS=--log-level INFO
-      - JAVA_OPTS=-Xmx1g -Xms256m
-    volumes:
-      - /dev/shm:/dev/shm
-    ports:
-      - "4444:4444"  # OK, pas de conflit
-      - "7900:7900"  # OK, pas de conflit
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks:
-      - external-network
-    restart: unless-stopped
+#  chrome-selenium:
+#    image: selenium/standalone-chrome:114.0
+#    container_name: chrome-selenium
+#    shm_size: '2gb'
+#    environment:
+#      - SE_NODE_SESSION_TIMEOUT=600
+#      - SE_SESSION_REQUEST_TIMEOUT=600
+#      - SE_SESSION_RETRY_INTERVAL=5
+#      - SE_NODE_MAX_SESSIONS=3
+#      - SE_VNC_NO_PASSWORD=1
+#      - SE_SCREEN_WIDTH=1920
+#      - SE_SCREEN_HEIGHT=1080
+#      - SE_OPTS=--log-level INFO
+#      - JAVA_OPTS=-Xmx1g -Xms256m
+#    volumes:
+#      - /dev/shm:/dev/shm
+#    ports:
+#      - "4444:4444"  # OK, pas de conflit
+#      - "7900:7900"  # OK, pas de conflit
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
+#      interval: 15s
+#      timeout: 10s
+#      retries: 5
+#      start_period: 30s
+#    networks:
+#      - external-network
+#    restart: unless-stopped
 
-  external-api:
-    container_name: external-api
-    image: doukoure93/external-api
-    environment:
-      POSTGRES_HOST: postgres-external
-      POSTGRES_PORT: 5432
-      POSTGRES_DATABASE: externaldb
-      POSTGRES_USERNAME: external2711
-      POSTGRES_PASSWORD: external2711
-
-      # Selenium
-      SELENIUM_REMOTE_URL: http://chrome-selenium:4444/wd/hub
-      CHROME_REMOTE_ENABLED: "true"
-
-      # Autres variables depuis application.dev.yml
-      APP_TITILE: External Application
-      APP_VERSION: 1.0.1
-      JWT_SECRET: mysecurecanalsecret
-      CONTAINER_PORT: 8090
-
-      # Email
-      EMAIL_HOST: smtp.gmail.com
-      EMAIL_PORT: 587
-      EMAIL_ID: douklifsa93@gmail.com
-      EMAIL_PASSWORD: "uppv zody hnsl bbzu"
-
-      # Orange API
-      ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
-      ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests
-      ORANGE_BALANCE_URL: https://api.orange.com/sms/admin/v1/contracts
-      ORANGE_CLIENT_CREDENTIALS: VExqQ1BlQ1ZDdUxTRURLUjc2Z0RZcXo5QWw4a3h5M3A6bVV6Y0tsTHhRdkp1Z1lpTWN2UFdjT2lMN3ppc3RSdDFCRjVvajIxNEwxRGs=
-      ORANGE_SENDER: "tel:+224622459305"
-
-      # SMS
-      CODE_LIMIT: 6
-      EXPIRY_MINUTE: 10
-      MAX_ATTEMPT: 3
-      LIMIT_PER_HOUR: 3
-      SENDER_NAME: "SMS 335524"
-      SMS_PRIMARY_PROVIDER: orange
-
-      # Slack
-      SLACK_CREDENTIAL: https://hooks.slack.com/services/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
-
-      # Profile
-      ACTIVE_PROFILE: dev
-
-      # JVM Options
-      JAVA_OPTS: "-Xmx512m -Xms256m -XX:+UseG1GC"
-    ports:
-      - "8090:8090"  # Changé pour correspondre à CONTAINER_PORT
-    networks:
-      - external-network
-    depends_on:
-      - db
-      - chrome-selenium
-    restart: unless-stopped
+#  external-api:
+#    container_name: external-api
+#    image: doukoure93/external-api
+#    environment:
+#      POSTGRES_HOST: postgres-external
+#      POSTGRES_PORT: 5432
+#      POSTGRES_DATABASE: externaldb
+#      POSTGRES_USERNAME: external2711
+#      POSTGRES_PASSWORD: external2711
+#
+#      # Selenium
+#      SELENIUM_REMOTE_URL: http://chrome-selenium:4444/wd/hub
+#      CHROME_REMOTE_ENABLED: "true"
+#
+#      # Autres variables depuis application.dev.yml
+#      APP_TITILE: External Application
+#      APP_VERSION: 1.0.1
+#      JWT_SECRET: mysecurecanalsecret
+#      CONTAINER_PORT: 8090
+#
+#      # Email
+#      EMAIL_HOST: smtp.gmail.com
+#      EMAIL_PORT: 587
+#      EMAIL_ID: douklifsa93@gmail.com
+#      EMAIL_PASSWORD: "uppv zody hnsl bbzu"
+#
+#      # Orange API
+#      ORANGE_OAUTH_URL: https://api.orange.com/oauth/v3/token
+#      ORANGE_OAUTH_URL_SMS: https://api.orange.com/smsmessaging/v1/outbound/tel:+224622459305/requests
+#      ORANGE_BALANCE_URL: https://api.orange.com/sms/admin/v1/contracts
+#      ORANGE_CLIENT_CREDENTIALS: VExqQ1BlQ1ZDdUxTRURLUjc2Z0RZcXo5QWw4a3h5M3A6bVV6Y0tsTHhRdkp1Z1lpTWN2UFdjT2lMN3ppc3RSdDFCRjVvajIxNEwxRGs=
+#      ORANGE_SENDER: "tel:+224622459305"
+#
+#      # SMS
+#      CODE_LIMIT: 6
+#      EXPIRY_MINUTE: 10
+#      MAX_ATTEMPT: 3
+#      LIMIT_PER_HOUR: 3
+#      SENDER_NAME: "SMS 335524"
+#      SMS_PRIMARY_PROVIDER: orange
+#
+#      # Slack
+#      SLACK_CREDENTIAL: https://hooks.slack.com/services/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
+#
+#      # Profile
+#      ACTIVE_PROFILE: dev
+#
+#      # JVM Options
+#      JAVA_OPTS: "-Xmx512m -Xms256m -XX:+UseG1GC"
+#    ports:
+#      - "8090:8090"  # Changé pour correspondre à CONTAINER_PORT
+#    networks:
+#      - external-network
+#    depends_on:
+#      - db
+#      - chrome-selenium
+#    restart: unless-stopped
 
   pgadmin-external:
     container_name: pgadmin-external
