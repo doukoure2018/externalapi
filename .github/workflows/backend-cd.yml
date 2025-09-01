@@ -218,7 +218,6 @@ jobs:
                   timeout: 10s
                   retries: 3
                   start_period: 60s
-            
               nginx:
                 container_name: nginx-proxy
                 image: nginx:alpine
@@ -246,16 +245,17 @@ jobs:
                 networks:
                   - external-network
                 restart: unless-stopped
-              
-              networks:
-                external-network:
-                  driver: bridge
+            
+            networks:
+              external-network:
+                driver: bridge
             
             volumes:
               postgres-data:
                 driver: local
               pgadmin-data:
                 driver: local
+              
             EOF
             
             # Create nginx configuration
