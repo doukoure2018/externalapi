@@ -232,24 +232,24 @@ jobs:
                   - external-api
                 restart: unless-stopped
             
-            pgadmin:
-              container_name: pgadmin-external
-              image: dpage/pgadmin4:latest
-              environment:
-                PGADMIN_DEFAULT_EMAIL: admin@external.com
-                PGADMIN_DEFAULT_PASSWORD: admin123
-                PGADMIN_CONFIG_SERVER_MODE: "False"
-              volumes:
-                - pgadmin-data:/var/lib/pgadmin
-              ports:
-                - "5050:80"
+              pgadmin:
+                container_name: pgadmin-external
+                image: dpage/pgadmin4:latest
+                environment:
+                  PGADMIN_DEFAULT_EMAIL: admin@external.com
+                  PGADMIN_DEFAULT_PASSWORD: admin123
+                  PGADMIN_CONFIG_SERVER_MODE: "False"
+                volumes:
+                  - pgadmin-data:/var/lib/pgadmin
+                ports:
+                  - "5050:80"
+                networks:
+                  - external-network
+                restart: unless-stopped
+              
               networks:
-                - external-network
-              restart: unless-stopped
-            
-            networks:
-              external-network:
-                driver: bridge
+                external-network:
+                  driver: bridge
             
             volumes:
               postgres-data:
