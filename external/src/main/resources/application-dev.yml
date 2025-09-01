@@ -46,4 +46,4 @@ SESSION_DURATION_DAY: 10
 SMS_PRIMARY_PROVIDER: orange
 
 # Slack Configuration
-SLACK_CREDENTIAL: https://hooks.slack.com/serv
+SLACK_CREDENTIAL: https://hooks.slack.com/services/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

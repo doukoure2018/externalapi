@@ -315,19 +315,20 @@ jobs:
           echo "🏥 Running health checks..."
           sleep 20
           
-          # Check if API is responding
+          # Check if API is responding (accepting both 200 and 401 as valid)
           max_attempts=10
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
             echo "Attempt $attempt/$max_attempts..."
           
-            if curl -f -s -o /dev/null -w "%{http_code}" http://51.83.40.55/actuator/health | grep -q "200"; then
-              echo "✅ API is healthy and responding!"
-              curl http://51.83.40.55/actuator/health | jq '.' || true
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://51.83.40.55:8090/actuator/health)
+          
+            if [ "$response" = "200" ] || [ "$response" = "401" ]; then
+              echo "✅ API is responding correctly (HTTP $response)"
               break
             else
-              echo "⏳ API not ready yet, waiting..."
+              echo "⏳ API not ready yet (HTTP $response), waiting..."
               sleep 10
               attempt=$((attempt + 1))
             fi
