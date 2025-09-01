@@ -245,7 +245,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
     @Override
     public String effectuerReabonnement(ReabonnementRequest req) {
-       return null;
+       return "this is the service for reabonnement";
     }
 
     // Méthode de login modifiée pour accepter AccessDto
