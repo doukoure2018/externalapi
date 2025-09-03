@@ -20,6 +20,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -43,9 +44,11 @@ public class AuthController {
     private Long expirationMinutes;
 
     @PostMapping("/register")
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(
-            summary = "Créer un nouveau compte",
-            description = "Enregistre un nouvel utilisateur dans le système"
+            summary = "Créer un nouveau compte (Admin uniquement)",
+            description = "Enregistre un nouvel utilisateur dans le système. **Nécessite le rôle ADMIN**",
+            security = @SecurityRequirement(name = "Bearer Authentication")
     )
     @ApiResponses(value = {
             @ApiResponse(
@@ -57,17 +60,27 @@ public class AuthController {
                     responseCode = "400",
                     description = "Nom d'utilisateur ou email déjà utilisé",
                     content = @Content(schema = @Schema(implementation = String.class))
+            ),
+            @ApiResponse(
+                    responseCode = "403",
+                    description = "Accès refusé - Rôle ADMIN requis",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            ),
+            @ApiResponse(
+                    responseCode = "401",
+                    description = "Non authentifié",
+                    content = @Content(schema = @Schema(implementation = String.class))
             )
     })
+    @SecurityRequirement(name = "Bearer Authentication")
     public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest request) {
-        // Votre code existant...
         if (userRepository.existsByUsername(request.getUsername())) {
             return ResponseEntity.badRequest()
                     .body("Error: Username is already taken!");
         }
 
         if (userRepository.existsByEmail(request.getEmail())) {
-            return ResponseEntity.badRequest()
+            return ResponseEntity.badRequest()a
                     .body("Error: Email is already in use!");
         }
 
