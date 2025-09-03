@@ -80,7 +80,7 @@ public class AuthController {
         }
 
         if (userRepository.existsByEmail(request.getEmail())) {
-            return ResponseEntity.badRequest()a
+            return ResponseEntity.badRequest()
                     .body("Error: Email is already in use!");
         }
 
