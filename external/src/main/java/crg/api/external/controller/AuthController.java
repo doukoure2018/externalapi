@@ -7,6 +7,14 @@ import crg.api.external.dto.auth.RegisterRequest;
 import crg.api.external.entity.User;
 import crg.api.external.repository.UserRepository;
 import crg.api.external.service.JwtService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +32,7 @@ import java.util.Set;
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
+@Tag(name = "Authentication", description = "Endpoints pour l'authentification et la gestion des tokens JWT")
 public class AuthController {
 
     private final UserRepository userRepository;
@@ -34,8 +43,24 @@ public class AuthController {
     private Long expirationMinutes;
 
     @PostMapping("/register")
+    @Operation(
+            summary = "Créer un nouveau compte",
+            description = "Enregistre un nouvel utilisateur dans le système"
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Compte créé avec succès",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))
+            ),
+            @ApiResponse(
+                    responseCode = "400",
+                    description = "Nom d'utilisateur ou email déjà utilisé",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            )
+    })
     public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest request) {
-        // Vérifier si l'utilisateur existe déjà
+        // Votre code existant...
         if (userRepository.existsByUsername(request.getUsername())) {
             return ResponseEntity.badRequest()
                     .body("Error: Username is already taken!");
@@ -46,9 +71,8 @@ public class AuthController {
                     .body("Error: Email is already in use!");
         }
 
-        // Créer nouvel utilisateur
         Set<String> roles = new HashSet<>();
-        roles.add("USER"); // Role par défaut
+        roles.add("USER");
 
         User user = User.builder()
                 .username(request.getUsername())
@@ -62,7 +86,6 @@ public class AuthController {
 
         userRepository.save(user);
 
-        // Générer les tokens
         String accessToken = jwtService.generateAccessToken(
                 user.getUsername(),
                 new ArrayList<>(user.getRoles())
@@ -79,17 +102,36 @@ public class AuthController {
     }
 
     @PostMapping("/login")
+    @Operation(
+            summary = "Se connecter",
+            description = "Authentifie un utilisateur et retourne les tokens JWT (access et refresh)"
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Connexion réussie",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))
+            ),
+            @ApiResponse(
+                    responseCode = "401",
+                    description = "Identifiants invalides",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            ),
+            @ApiResponse(
+                    responseCode = "403",
+                    description = "Compte désactivé ou verrouillé",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            )
+    })
     public ResponseEntity<?> login(@Valid @RequestBody LoginRequest request) {
-        // Chercher l'utilisateur
+        // Votre code existant...
         User user = userRepository.findByUsername(request.getUsername())
                 .orElseThrow(() -> new BadCredentialsException("Invalid username or password"));
 
-        // Vérifier le mot de passe
         if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
             throw new BadCredentialsException("Invalid username or password");
         }
 
-        // Vérifier si le compte est actif
         if (!user.isEnabled()) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body("Account is disabled");
@@ -100,7 +142,6 @@ public class AuthController {
                     .body("Account is locked");
         }
 
-        // Générer les tokens
         String accessToken = jwtService.generateAccessToken(
                 user.getUsername(),
                 new ArrayList<>(user.getRoles())
@@ -117,30 +158,40 @@ public class AuthController {
     }
 
     @PostMapping("/refresh")
+    @Operation(
+            summary = "Rafraîchir le token",
+            description = "Génère un nouveau token d'accès en utilisant le refresh token"
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Token rafraîchi avec succès",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))
+            ),
+            @ApiResponse(
+                    responseCode = "401",
+                    description = "Refresh token invalide ou expiré",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            )
+    })
     public ResponseEntity<?> refreshToken(@Valid @RequestBody RefreshTokenRequest request) {
+        // Votre code existant...
         try {
             String refreshToken = request.getRefreshToken();
 
-            // Valider le refresh token
             if (!jwtService.isRefreshToken(refreshToken)) {
                 return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                         .body("Invalid refresh token");
             }
 
-            // Extraire le username
             String username = jwtService.extractUsername(refreshToken);
-
-            // Chercher l'utilisateur
             User user = userRepository.findByUsername(username)
                     .orElseThrow(() -> new BadCredentialsException("User not found"));
 
-            // Générer nouveau access token
             String newAccessToken = jwtService.generateAccessToken(
                     user.getUsername(),
                     new ArrayList<>(user.getRoles())
             );
-
-            // Générer nouveau refresh token
             String newRefreshToken = jwtService.generateRefreshToken(user.getUsername());
 
             return ResponseEntity.ok(AuthResponse.builder()
@@ -158,7 +209,28 @@ public class AuthController {
     }
 
     @GetMapping("/validate")
-    public ResponseEntity<?> validateToken(@RequestHeader("Authorization") String authHeader) {
+    @Operation(
+            summary = "Valider un token",
+            description = "Vérifie la validité d'un token JWT",
+            security = @SecurityRequirement(name = "Bearer Authentication")
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Token valide",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            ),
+            @ApiResponse(
+                    responseCode = "401",
+                    description = "Token invalide ou expiré",
+                    content = @Content(schema = @Schema(implementation = String.class))
+            )
+    })
+    @SecurityRequirement(name = "Bearer Authentication")
+    public ResponseEntity<?> validateToken(
+            @Parameter(description = "Token JWT avec le préfixe Bearer", required = true)
+            @RequestHeader("Authorization") String authHeader) {
+        // Votre code existant...
         try {
             if (authHeader == null || !authHeader.startsWith("Bearer ")) {
                 return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
@@ -176,7 +248,4 @@ public class AuthController {
                     .body("Invalid token: " + e.getMessage());
         }
     }
-
-
-
 }

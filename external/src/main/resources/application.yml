@@ -134,4 +134,45 @@ slack:
   credential: ${SLACK_CREDENTIAL}
 
 
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+    try-it-out-enabled: true
+    operations-sorter: method
+    tags-sorter: alpha
+    display-request-duration: true
+    deep-linking: true
+    persist-authorization: true  # Garde le token JWT après refresh de la page
+    display-operation-id: false
+    default-models-expand-depth: 1
+    default-model-expand-depth: 1
+    doc-expansion: none  # none, list, ou full
+    filter: true  # Permet de filtrer les endpoints
+    show-extensions: true
+    show-common-extensions: true
+    disable-swagger-default-url: true
+
+  # Informations personnalisées pour l'API
+  show-actuator: false  # Ne pas exposer les endpoints actuator dans Swagger
+
+  # Groupes d'API pour organiser les endpoints
+  group-configs:
+    - group: authentication
+      paths-to-match:
+        - /api/auth/**
+      display-name: Authentication API
+
+    - group: reabonnement
+      paths-to-match:
+        - /api/reabo/**
+      display-name: Réabonnement API
+
+    - group: all
+      paths-to-match:
+        - /**
+      display-name: All APIs
 
