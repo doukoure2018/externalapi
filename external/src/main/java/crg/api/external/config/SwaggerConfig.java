@@ -58,9 +58,7 @@ public class SwaggerConfig {
                                 3. Cliquez sur le bouton 'Authorize' ci-dessous
                                 4. Entrez le token (sans le préfixe 'Bearer')
                                 
-                                ### Utilisateur de test:
-                                - Username: `admin`
-                                - Password: `admin123`
+    
                                 """)
                         .contact(new Contact()
                                 .name("External API Team")

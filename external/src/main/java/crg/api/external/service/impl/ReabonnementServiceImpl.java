@@ -1,10 +1,14 @@
 package crg.api.external.service.impl;
 
 import crg.api.external.dto.AccessDto;
+import crg.api.external.dto.PackageDto;
 import crg.api.external.dto.TokenResponse;
+import crg.api.external.dto.reabo.PackageDetailsResponse;
 import crg.api.external.dto.reabo.ReabonnementRequest;
+import crg.api.external.dto.reabo.TransactionDto;
 import crg.api.external.enumeration.ValidationStatus;
 import crg.api.external.repository.AccessRepository;
+import crg.api.external.repository.ReabonnementRepository;
 import crg.api.external.service.OrangeSmsService;
 import crg.api.external.service.ReabonnementService;
 import crg.api.external.service.SlackService;
@@ -25,6 +29,7 @@ import org.openqa.selenium.remote.RemoteWebDriver;
 import org.openqa.selenium.support.ui.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.stereotype.Service;
 
@@ -51,6 +56,11 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     private final SlackService slackService;
 
     private final AccessRepository accessRepository;
+
+    private final ReabonnementRepository reabonnementRepository;
+
+    private final Map<String, LocalDateTime> blocked2FAAccounts = new ConcurrentHashMap<>();
+    private static final int BLOCK_DURATION_MINUTES = 30; // Durée de blocage temporaire
 
     @Value("${selenium.remote.url:}")
     private String seleniumRemoteUrl;
@@ -234,18 +244,410 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(10));
     }
 
-    // SMS de début de processus
-
-
-    // SMS de succès avec détails
-
-
-
-
-
     @Override
     public String effectuerReabonnement(ReabonnementRequest req) {
-       return "this is the service for reabonnemment";
+        long startTime = System.currentTimeMillis();
+        log.info("🚀 DÉBUT RÉABONNEMENT pour abonné {}", req.getNumAbonne());
+
+        // Variables déclarées au niveau méthode
+        AccessDto accessDto = null;
+        WebDriver driver = null;
+        JavascriptExecutor js = null;
+        WebDriverWait wait = null;
+        TransactionDto transaction = null;
+
+        // Variables de résultat
+        boolean needReturn = false;
+        String montantFinal = "N/A";
+        String subscriberPhone = null;
+        LocalDate subscriptionStartDate = null;
+        LocalDate subscriptionEndDate = null;
+        long processingDuration = 0;
+
+        // SLACK: Notification de début (sans user)
+        slackService.sendReabonnementProgress("START",
+                String.format("Démarrage réabonnement - Décodeur: %s, Offre: %s %s, Option: %s",
+                        req.getNumAbonne(), req.getOffre(), req.getDuree(),
+                        req.getOption() != null ? req.getOption() : "SANS_OPTION"));
+
+        try {
+            // ========== PHASE 1: INITIALISATION ==========
+
+            // 1.1 Login avec rotation des comptes Canal+
+            driver = getOrCreateDriver();
+            if (driver == null) {
+                slackService.sendReabonnementError(req, "DRIVER_ERROR",
+                        "Service temporairement indisponible - Impossible de démarrer le navigateur");
+                return "Erreur : Impossible de démarrer le navigateur";
+            }
+
+            js = (JavascriptExecutor) driver;
+            wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+
+            // ========== PHASE 2: LOGIN AVEC ROTATION 2FA ==========
+            slackService.sendReabonnementProgress("LOGIN", "Connexion au système Canal+...");
+
+            // Utiliser la méthode performFastLogin qui gère déjà la rotation
+            performFastLogin(driver, js);
+
+            // Récupérer le compte utilisé après login réussi
+            // (La méthode performFastLogin aura déjà géré la rotation et le 2FA)
+
+            // ========== PHASE 3: RECHERCHE ABONNÉ ==========
+
+            slackService.sendSearchingDecoder(req.getNumAbonne());
+
+            boolean searchSuccess = performRobustSearch(driver, js, wait, req.getNumAbonne());
+
+            slackService.sendDecoderFound(req.getNumAbonne(), searchSuccess);
+
+            if (!searchSuccess) {
+                slackService.sendReabonnementError(req, "DECODER_NOT_FOUND",
+                        "Abonné " + req.getNumAbonne() + " introuvable");
+
+                // Créer la transaction d'échec (sans user_id)
+                transaction = createTransaction(req, montantFinal, null, null,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("DECODER_NOT_FOUND");
+                saveTransaction(transaction);
+
+                return "Erreur : Abonné " + req.getNumAbonne() + " introuvable";
+            }
+
+            // ========== PHASE 4: CONFIGURATION ==========
+
+            slackService.sendReabonnementProgress("SELECTION",
+                    String.format("Configuration: %s - %s - %s",
+                            req.getOffre(), req.getDuree(), req.getOption()));
+
+            performFastSelection(driver, js, wait, req);
+
+            // ========== PHASE 5: EXTRACTION DONNÉES ==========
+
+            // 5.1 Extraction du téléphone de l'abonné
+            subscriberPhone = extractSubscriberPhone(driver, js);
+            if (subscriberPhone != null) {
+                slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
+                        "Numéro abonné: " + subscriberPhone);
+            }
+
+            // 5.2 Extraction des données de facture
+            Map<String, Object> invoiceData = extractInvoiceData(driver, js);
+            montantFinal = (String) invoiceData.get("montant");
+            subscriptionStartDate = (LocalDate) invoiceData.get("dateDebut");
+            subscriptionEndDate = (LocalDate) invoiceData.get("dateFin");
+
+            if (!montantFinal.equals("N/A")) {
+                slackService.sendReabonnementProgress("MONTANT", "Montant: " + montantFinal);
+            }
+
+            // ========== PHASE 6: VALIDATION ==========
+
+            slackService.sendReabonnementProgress("VALIDATION", "Validation en cours...");
+
+            boolean validationSuccess = performValidationWithConfirmation(driver, js, wait);
+
+            if (!validationSuccess) {
+                String errorCheck = checkForErrors(driver, wait);
+                if (errorCheck != null) {
+                    slackService.sendValidationStatus("ERROR", errorCheck);
+                    throw new RuntimeException(errorCheck);
+                } else {
+                    slackService.sendValidationStatus("ERROR", "Aucune confirmation reçue");
+                    throw new RuntimeException("Échec de la validation - Aucune confirmation reçue");
+                }
+            }
+
+            // ========== PHASE 7: SUCCÈS - ENREGISTREMENT ==========
+
+            processingDuration = System.currentTimeMillis() - startTime;
+            log.info("🎉 Réabonnement CONFIRMÉ avec succès en {}ms", processingDuration);
+
+            slackService.sendValidationStatus("SUCCESS",
+                    String.format("Confirmé en %dms", processingDuration));
+
+            // Créer et sauvegarder la transaction de succès
+            transaction = createTransaction(req, montantFinal,
+                    subscriptionStartDate, subscriptionEndDate,
+                    "completed", null, processingDuration);
+
+            saveTransaction(transaction);
+
+            // Notifications de succès
+            slackService.sendReabonnementSuccess(req, montantFinal,
+                    transaction.getReferenceNumber());
+
+            // SMS si numéro disponible
+            if (subscriberPhone != null && !subscriberPhone.isEmpty()) {
+                sendSmsSuccessToSubscriber(subscriberPhone, req, montantFinal, transaction);
+            }
+
+            needReturn = true;
+            return "Réabonnement effectué avec succès !";
+
+        } catch (Exception e) {
+            log.error("Erreur réabonnement", e);
+            String errorMsg = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
+
+            // ========== GESTION DES CAS D'ERREUR SPÉCIFIQUES ==========
+
+            // CAS 1: ERREUR OPTION/PAYMENT MEAN
+            if (errorMsg.contains("OPTION_NON_SELECTIONNEE") ||
+                    errorMsg.contains("payment mean") ||
+                    errorMsg.contains("Please select payment mean")) {
+
+                log.warn("⚠️ Erreur option/payment mean détectée, vérification du succès réel...");
+
+                try {
+                    Thread.sleep(5000);
+
+                    if (driver != null) {
+                        String currentUrl = driver.getCurrentUrl();
+                        boolean hasSuccess = isSuccessMessageDisplayed(driver);
+
+                        if (!currentUrl.contains("search-subscriber") ||
+                                currentUrl.contains("success") ||
+                                currentUrl.contains("confirmation") ||
+                                currentUrl.contains("reports") ||
+                                hasSuccess) {
+
+                            log.info("✅ Succès confirmé malgré l'erreur payment mean!");
+
+                            transaction = createTransaction(req, montantFinal,
+                                    subscriptionStartDate, subscriptionEndDate,
+                                    "completed", null, System.currentTimeMillis() - startTime);
+                            saveTransaction(transaction);
+
+                            slackService.sendReabonnementSuccess(req, montantFinal,
+                                    transaction.getReferenceNumber());
+
+                            needReturn = true;
+                            return "Réabonnement effectué avec succès !";
+                        }
+                    }
+
+                    // Si vraiment une erreur
+                    transaction = createTransaction(req, montantFinal,
+                            subscriptionStartDate, subscriptionEndDate,
+                            "failed", null, System.currentTimeMillis() - startTime);
+                    transaction.setErrorMessage("OPTION_NON_SELECTIONNEE");
+                    saveTransaction(transaction);
+
+                    slackService.sendReabonnementError(req, "OPTION_ERROR",
+                            "Erreur de sélection d'option - Payment mean non sélectionné");
+                    return "Erreur : Option non sélectionnée correctement (payment mean)";
+
+                } catch (Exception ex) {
+                    log.error("Erreur vérification: {}", ex.getMessage());
+                }
+            }
+
+            // CAS 2: Solde insuffisant
+            if (errorMsg.contains("SOLDE_INSUFFISANT") || errorMsg.contains("DTA-1009")) {
+                log.warn("⚠️ Solde insuffisant pour l'abonné {}", req.getNumAbonne());
+
+                slackService.sendReabonnementError(req, "SOLDE_INSUFFISANT",
+                        "Solde insuffisant sur le compte distributeur Canal+");
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("SOLDE_INSUFFISANT");
+                saveTransaction(transaction);
+
+                return "Erreur : Solde insuffisant sur votre compte distributeur.";
+            }
+
+            // CAS 3: Timeout
+            if (errorMsg.contains("Aucune confirmation reçue") ||
+                    errorMsg.contains("timeout") ||
+                    errorMsg.contains("Timeout")) {
+
+                log.warn("⏱️ Timeout de confirmation détecté - Vérification...");
+
+                try {
+                    Thread.sleep(3000);
+
+                    String errorCheck = checkForErrors(driver, wait);
+                    if (errorCheck == null || errorCheck.equals("ERREUR_INCONNUE")) {
+                        // Probable succès
+                        log.info("✅ Timeout sans erreur = succès présumé");
+
+                        transaction = createTransaction(req, montantFinal,
+                                subscriptionStartDate, subscriptionEndDate,
+                                "completed", null, System.currentTimeMillis() - startTime);
+                        saveTransaction(transaction);
+
+                        slackService.sendReabonnementSuccess(req, montantFinal,
+                                transaction.getReferenceNumber());
+
+                        needReturn = true;
+                        return "Réabonnement effectué avec succès !";
+                    }
+                } catch (Exception ex) {
+                    log.debug("Erreur vérification timeout: {}", ex.getMessage());
+                }
+            }
+
+            // CAS 4: Abonné introuvable
+            if (errorMsg.contains("introuvable")) {
+                slackService.sendReabonnementError(req, "DECODER_NOT_FOUND", errorMsg);
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("DECODER_NOT_FOUND");
+                saveTransaction(transaction);
+
+                return "Erreur : " + errorMsg;
+            }
+
+            // CAS GÉNÉRAL: Erreur technique
+            slackService.sendReabonnementError(req, "ERREUR_TECHNIQUE", errorMsg);
+
+            transaction = createTransaction(req, montantFinal,
+                    subscriptionStartDate, subscriptionEndDate,
+                    "failed", null, System.currentTimeMillis() - startTime);
+            transaction.setErrorMessage(errorMsg);
+            saveTransaction(transaction);
+
+            return "Erreur technique - Veuillez réessayer";
+
+        } finally {
+            // Nettoyage des ressources
+            if (driver != null) {
+                if (needReturn) {
+                    driverPool.offer(driver);
+                } else {
+                    try { driver.quit(); } catch (Exception ignored) {}
+                }
+            }
+        }
+    }
+
+
+    // Nouvelle méthode pour créer une transaction sans user_id
+    private TransactionDto createTransaction(ReabonnementRequest req,
+                                             String montant, LocalDate startDate,
+                                             LocalDate endDate, String status,
+                                             String canalUsername, long processingDuration) {
+
+        // S'assurer que le décodeur existe
+        ensureDecoderExists(req.getNumAbonne());
+
+        return TransactionDto.builder()
+                .decoderNumber(req.getNumAbonne())
+                .packageId(mapPackageId(req.getOffre()))
+                .languageOptionId(mapOptionId(req.getOption()))
+                .durationId(mapDurationId(req.getDuree()))
+                .amountGnf(extractNumericAmount(montant))
+                .transactionDate(LocalDateTime.now())
+                .status(status)
+                .paymentMethod("DISTRIBUTEUR")
+                .referenceNumber(generateReferenceNumber())
+                .subscriptionStartDate(startDate)
+                .subscriptionEndDate(endDate)
+                .canalUsername(canalUsername)
+                .processingDurationMs((int) processingDuration)
+                .errorMessage(null) // Sera défini plus tard si erreur
+                .build();
+    }
+
+    // Méthode pour sauvegarder la transaction
+    private void saveTransaction(TransactionDto transaction) {
+        if (transaction == null) {
+            log.warn("⚠️ Transaction null, pas d'enregistrement");
+            return;
+        }
+
+        try {
+            reabonnementRepository.addTransaction(transaction);
+
+            log.info("✅ Transaction enregistrée: {} - {} - {} GNF - Référence: {}",
+                    transaction.getDecoderNumber(),
+                    transaction.getStatus(),
+                    transaction.getAmountGnf(),
+                    transaction.getReferenceNumber());
+
+        } catch (Exception e) {
+            log.error("❌ Erreur lors de l'enregistrement de la transaction: {}", e.getMessage());
+        }
+    }
+
+    // Méthode pour s'assurer que le décodeur existe
+    private void ensureDecoderExists(String decoderNumber) {
+        if (decoderNumber == null || decoderNumber.trim().isEmpty()) {
+            log.warn("⚠️ Numéro de décodeur vide");
+            return;
+        }
+
+        try {
+            String checkSql = "SELECT COUNT(*) FROM decoders WHERE decoder_number = ?";
+            Integer count = jdbcTemplate.queryForObject(checkSql, Integer.class, decoderNumber);
+
+            if (count == null || count == 0) {
+                String insertSql = """
+                INSERT INTO decoders (decoder_number, status, installation_date) 
+                VALUES (?, 'active', CURRENT_DATE) 
+                ON CONFLICT (decoder_number) DO NOTHING
+                """;
+
+                jdbcTemplate.update(insertSql, decoderNumber);
+                log.info("✅ Nouveau décodeur créé: {}", decoderNumber);
+            }
+        } catch (Exception e) {
+            log.error("❌ Erreur vérification/création décodeur: {}", e.getMessage());
+        }
+    }
+
+    // Générer un numéro de référence unique
+    private String generateReferenceNumber() {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+        String timestamp = LocalDateTime.now().format(formatter);
+        String random = UUID.randomUUID().toString().substring(0, 4).toUpperCase();
+        return String.format("REB-%s-%s", timestamp, random);
+    }
+
+    // SMS de succès pour l'abonné
+    private void sendSmsSuccessToSubscriber(String subscriberPhone, ReabonnementRequest req,
+                                            String montant, TransactionDto transaction) {
+        smsExecutor.execute(() -> {
+            try {
+                TokenResponse token = orangeSmsService.getOAuthToken();
+                if (!isTokenValid(token)) {
+                    log.error("❌ Token invalide pour envoi SMS");
+                    return;
+                }
+
+                // Formater le reçu
+                DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy à HH:mm");
+                String dateFormatted = transaction.getTransactionDate().format(dateFormatter);
+                String montantFormatted = String.format("+%,d GNF", transaction.getAmountGnf())
+                        .replace(",", " ");
+
+                String message = String.format(
+                        "🧾 REÇU IO REABO\n\n" +
+                                "Montant: %s\n" +
+                                "Type: %s\n" +
+                                "Date: %s\n" +
+                                "Statut: Effectuée\n" +
+                                "Décodeur: %s\n" +
+                                "Référence: %s\n\n" +
+                                "Merci!",
+                        montantFormatted,
+                        req.getOffre().toUpperCase(),
+                        dateFormatted,
+                        req.getNumAbonne(),
+                        transaction.getReferenceNumber()
+                );
+
+                orangeSmsService.sendSms(token.getToken(), subscriberPhone, senderName, message);
+                log.info("📱 SMS Reçu envoyé à l'abonné {}", subscriberPhone);
+
+            } catch (Exception e) {
+                log.error("Erreur envoi SMS: {}", e.getMessage());
+            }
+        });
     }
 
     // Méthode de login modifiée pour accepter AccessDto
@@ -874,36 +1276,96 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
     }
 
+
     private void performFastLogin(WebDriver driver, JavascriptExecutor js) {
-        AccessDto accessDto = accessRepository.findActiveAccess();
-        log.info("🔐 Login rapide...");
-        driver.get("https://cgaweb-afrique.canal-plus.com/mypos/");
+        int maxAttempts = 5; // Nombre maximum de tentatives avec différents comptes
+        AccessDto accessDto = null;
+        boolean loginSuccessful = false;
+        Set<String> failedAccounts = new HashSet<>(); // Pour éviter de réessayer un compte qui a échoué
 
-        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-        WebElement loginInput = wait.until(ExpectedConditions.presenceOfElementLocated(LOGIN_INPUT));
-        WebElement passwordInput = wait.until(ExpectedConditions.presenceOfElementLocated(PASSWORD_INPUT));
+        for (int attempt = 1; attempt <= maxAttempts && !loginSuccessful; attempt++) {
+            try {
+                // Récupérer un compte qui n'a pas encore échoué
+                accessDto = getNextAvailableAccount(failedAccounts);
 
-        loginInput.clear();
-        //loginInput.sendKeys(login);
-        loginInput.sendKeys(accessDto.getUsername());
-        passwordInput.clear();
-        //passwordInput.sendKeys(password);
-        passwordInput.sendKeys(accessDto.getPassword());
+                if (accessDto == null) {
+                    log.error("❌ Plus aucun compte Canal+ disponible après {} tentatives", attempt - 1);
+                    throw new RuntimeException("Aucun compte Canal+ disponible");
+                }
 
-        passwordInput.sendKeys(Keys.RETURN);
+                log.info("🔐 Tentative #{} - Login avec le compte: {}", attempt, accessDto.getUsername());
 
-        try {
-            wait.withTimeout(Duration.ofSeconds(15)).until(ExpectedConditions.or(
-                    ExpectedConditions.urlContains("dashboard"),
-                    ExpectedConditions.urlContains("search-subscriber"),
-                    ExpectedConditions.presenceOfElementLocated(SUBSCRIBER_INPUT)
-            ));
-            log.info("✅ Login successful");
-        } catch (TimeoutException e) {
-            throw new RuntimeException("Login timeout after 15 seconds");
+                // Tenter la connexion
+                driver.get("https://cgaweb-afrique.canal-plus.com/mypos/");
+
+                WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+                WebElement loginInput = wait.until(ExpectedConditions.presenceOfElementLocated(LOGIN_INPUT));
+                WebElement passwordInput = wait.until(ExpectedConditions.presenceOfElementLocated(PASSWORD_INPUT));
+
+                loginInput.clear();
+                loginInput.sendKeys(accessDto.getUsername());
+                passwordInput.clear();
+                passwordInput.sendKeys(accessDto.getPassword());
+
+                passwordInput.sendKeys(Keys.RETURN);
+
+                try {
+                    // Attendre la redirection après connexion
+                    wait.withTimeout(Duration.ofSeconds(15)).until(ExpectedConditions.or(
+                            ExpectedConditions.urlContains("dashboard"),
+                            ExpectedConditions.urlContains("search-subscriber"),
+                            ExpectedConditions.presenceOfElementLocated(SUBSCRIBER_INPUT)
+                    ));
+
+                    // Vérifier si on est bien connecté
+                    String currentUrl = driver.getCurrentUrl();
+                    if (currentUrl.contains("dashboard") ||
+                            currentUrl.contains("search-subscriber") ||
+                            driver.findElements(SUBSCRIBER_INPUT).size() > 0) {
+
+                        log.info("✅ Login successful avec {}", accessDto.getUsername());
+                        loginSuccessful = true;
+
+                        // Mettre à jour la dernière utilisation du compte
+                        updateAccountLastUsed(accessDto);
+
+                    } else {
+                        throw new TimeoutException("Page de connexion toujours affichée");
+                    }
+
+                } catch (TimeoutException e) {
+                    log.warn("⚠️ Échec de connexion pour le compte {} - Probable 2FA activé", accessDto.getUsername());
+
+                    // Ajouter le compte à la liste des échecs
+                    failedAccounts.add(accessDto.getUsername());
+
+                    // Envoyer SMS d'alerte pour activation 2FA
+                    send2FAAlertSMS(accessDto.getUsername());
+
+                    // Si ce n'est pas la dernière tentative, continuer avec un autre compte
+                    if (attempt < maxAttempts) {
+                        log.info("🔄 Passage au compte suivant...");
+                        Thread.sleep(2000); // Petite pause avant la prochaine tentative
+                    } else {
+                        log.error("❌ Échec de connexion après {} tentatives", maxAttempts);
+                        throw new RuntimeException("Impossible de se connecter après " + maxAttempts + " tentatives");
+                    }
+                }
+
+            } catch (RuntimeException re) {
+                throw re; // Relancer les RuntimeException
+            } catch (Exception e) {
+                log.error("Erreur lors de la tentative de connexion #{}: {}", attempt, e.getMessage());
+                if (accessDto != null) {
+                    failedAccounts.add(accessDto.getUsername());
+                }
+            }
+        }
+
+        if (!loginSuccessful) {
+            throw new RuntimeException("Échec de connexion avec tous les comptes disponibles");
         }
     }
-
     private boolean performRobustSearch(WebDriver driver, JavascriptExecutor js,
                                         WebDriverWait wait, String numAbonne) {
         log.info("🔍 Recherche de l'abonné {}...", numAbonne);
@@ -1754,6 +2216,26 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
     }
 
+    @Override
+    public List<PackageDto> getAllPackages() {
+        return reabonnementRepository.getAllPackages();
+    }
+
+    @Override
+    public PackageDetailsResponse getPackageDetailsStructured(String packageId) {
+        return reabonnementRepository.getPackageDetailsStructured(packageId);
+    }
+
+    @Override
+    public void addTransaction(TransactionDto transactionDto) {
+         reabonnementRepository.addTransaction(transactionDto);
+    }
+
+    @Override
+    public List<TransactionDto> getAllTransactionByUserId() {
+        return reabonnementRepository.getAllTransactionByUserId();
+    }
+
     // Méthode helper pour formater les dates
     private String formatDate(String date) {
         if (date == null) return null;
@@ -1813,4 +2295,135 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             return "";
         }
     }
+
+    private boolean isAccountTemporarilyBlocked(String username) {
+        LocalDateTime blockedUntil = blocked2FAAccounts.get(username);
+        if (blockedUntil != null) {
+            if (LocalDateTime.now().isBefore(blockedUntil)) {
+                return true;
+            } else {
+                // Le blocage a expiré, retirer du cache
+                blocked2FAAccounts.remove(username);
+            }
+        }
+        return false;
+    }
+
+    private AccessDto getNextAvailableAccount(Set<String> failedAccounts) {
+        try {
+            // Récupérer tous les comptes actifs
+            List<AccessDto> activeAccounts = reabonnementRepository.findAllActiveAccess();
+
+            // Filtrer les comptes qui n'ont pas encore échoué
+            List<AccessDto> availableAccounts = activeAccounts.stream()
+                    .filter(account -> !failedAccounts.contains(account.getUsername()))
+                    .sorted((a, b) -> {
+                        // Trier par dernière utilisation (le moins récent en premier)
+                        if (a.getLastUsedAt() == null) return -1;
+                        if (b.getLastUsedAt() == null) return 1;
+                        return a.getLastUsedAt().compareTo(b.getLastUsedAt());
+                    })
+                    .collect(Collectors.toList());
+
+            if (availableAccounts.isEmpty()) {
+                return null;
+            }
+
+            // Retourner le compte le moins récemment utilisé
+            return availableAccounts.get(0);
+
+        } catch (Exception e) {
+            log.error("Erreur lors de la récupération des comptes: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void blockAccountTemporarily(String username) {
+        blocked2FAAccounts.put(username, LocalDateTime.now().plusMinutes(BLOCK_DURATION_MINUTES));
+        log.info("🔒 Compte {} bloqué temporairement pour {} minutes", username, BLOCK_DURATION_MINUTES);
+    }
+
+    // Nouvelle méthode pour envoyer un SMS d'alerte 2FA
+    private void send2FAAlertSMS(String accountUsername) {
+        smsExecutor.execute(() -> {
+            try {
+                TokenResponse token = orangeSmsService.getOAuthToken();
+                if (!isTokenValid(token)) {
+                    log.error("❌ Token invalide pour envoi SMS alerte 2FA");
+                    return;
+                }
+
+                String message = String.format("🚨 URGENT: Veuillez activer la session du compte %s via Google Authenticator",
+                        accountUsername);
+
+                // Envoyer aux deux numéros
+                String[] adminNumbers = {"+224621091895"};
+
+                for (String number : adminNumbers) {
+                    try {
+                        orangeSmsService.sendSms(token.getToken(), number, senderName, message);
+                        log.info("📱 SMS d'alerte 2FA envoyé à {}", number);
+                        Thread.sleep(500); // Petite pause entre les envois
+                    } catch (Exception e) {
+                        log.error("Erreur envoi SMS à {}: {}", number, e.getMessage());
+                    }
+                }
+
+            } catch (Exception e) {
+                log.error("Erreur lors de l'envoi des SMS d'alerte 2FA: {}", e.getMessage());
+            }
+        });
+    }
+
+    // Nouvelle méthode pour mettre à jour la dernière utilisation d'un compte
+    private void updateAccountLastUsed(AccessDto account) {
+        try {
+            String updateSql = "UPDATE accesscanal SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?";
+            jdbcTemplate.update(updateSql, account.getId());
+            log.debug("✅ Dernière utilisation mise à jour pour le compte {}", account.getUsername());
+        } catch (Exception e) {
+            log.error("Erreur mise à jour last_used_at: {}", e.getMessage());
+            // Ne pas faire échouer le processus principal
+        }
+    }
+    @Scheduled(fixedDelay = 600000) // Toutes les 10 minutes
+    private void cleanupBlockedAccountsCache() {
+        int beforeSize = blocked2FAAccounts.size();
+        blocked2FAAccounts.entrySet().removeIf(entry ->
+                LocalDateTime.now().isAfter(entry.getValue())
+        );
+        int removed = beforeSize - blocked2FAAccounts.size();
+        if (removed > 0) {
+            log.info("🧹 Nettoyage cache 2FA: {} comptes débloqués", removed);
+        }
+    }
+
+    public Map<String, Object> getAccountsStatus() {
+        Map<String, Object> status = new HashMap<>();
+
+        try {
+            List<AccessDto> allAccounts = reabonnementRepository.findAllActiveAccess();
+
+            status.put("total_accounts", allAccounts.size());
+            status.put("blocked_by_2fa", blocked2FAAccounts.size());
+            status.put("available_now", allAccounts.size() - blocked2FAAccounts.size());
+
+            List<Map<String, Object>> blockedDetails = new ArrayList<>();
+            blocked2FAAccounts.forEach((username, blockedUntil) -> {
+                Map<String, Object> detail = new HashMap<>();
+                detail.put("username", username);
+                detail.put("blocked_until", blockedUntil.toString());
+                detail.put("minutes_remaining",
+                        Duration.between(LocalDateTime.now(), blockedUntil).toMinutes());
+                blockedDetails.add(detail);
+            });
+            status.put("blocked_accounts_details", blockedDetails);
+
+        } catch (Exception e) {
+            log.error("Erreur récupération statut comptes: {}", e.getMessage());
+        }
+
+        return status;
+    }
+
 }

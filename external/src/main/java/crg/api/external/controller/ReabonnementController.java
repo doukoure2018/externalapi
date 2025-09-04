@@ -2,6 +2,8 @@ package crg.api.external.controller;
 
 import crg.api.external.domain.HttpResponse;
 import crg.api.external.dto.reabo.ReabonnementRequest;
+import crg.api.external.dto.reabo.TransactionDto;
+import crg.api.external.dto.reabo.UserFavoriteDecoderDto;
 import crg.api.external.service.ReabonnementService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -9,18 +11,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.time.LocalDateTime;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static java.time.LocalTime.now;
+import static java.util.Map.of;
 import static org.springframework.http.HttpStatus.CREATED;
+import static org.springframework.http.HttpStatus.OK;
 
 @RestController
 @RequestMapping("/api/reabo")
@@ -47,9 +50,100 @@ public class ReabonnementController {
         }
     }
 
+
+    @PostMapping("/check-decoder")
+    public ResponseEntity<?> verifierAbonne(@RequestParam String numAbonne) {
+        long startTime = System.currentTimeMillis();
+
+        try {
+            Optional<Map<String, Object>> infos = reabonnementService.rechercherInfosAbonne(numAbonne);
+            long duration = System.currentTimeMillis() - startTime;
+
+            if (infos.isPresent()) {
+                Map<String, Object> data = new HashMap<>(infos.get());
+
+                // Ajouter les métadonnées standard
+                data.put("existe", true);
+                data.put("source", "verification");
+                data.put("dureeExecution", duration + "ms");
+
+                // Gérer le message selon le nombre de résultats
+                @SuppressWarnings("unchecked")
+                List<Map<String, String>> resultats = (List<Map<String, String>>) data.get("resultats");
+
+                if (resultats != null) {
+                    int count = resultats.size();
+                    if (count == 1) {
+                        data.put("message", "Abonné trouvé");
+                        // Pour la rétrocompatibilité, ajouter les infos du premier résultat au niveau racine
+                        data.putAll(resultats.get(0));
+                    } else {
+                        data.put("message", count + " abonnés trouvés");
+                    }
+                } else {
+                    data.put("message", "Abonné trouvé");
+                }
+
+                return ResponseEntity.ok(data);
+
+            } else {
+                return ResponseEntity.ok(Map.of(
+                        "existe", false,
+                        "message", "Aucun abonné correspondant trouvé",
+                        "source", "verification",
+                        "dureeExecution", duration + "ms",
+                        "query", numAbonne,
+                        "nombre_resultats", 0
+                ));
+            }
+
+        } catch (Exception e) {
+            log.error("Erreur vérification abonné '{}': {}", numAbonne, e.getMessage());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of(
+                            "existe", false,
+                            "error", true,
+                            "message", "Erreur lors de la vérification",
+                            "details", e.getMessage()
+                    ));
+        }
+    }
+
+
+    @GetMapping("/allPackages")
+    public ResponseEntity<HttpResponse> getAllPackages()
+    {
+
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(LocalDateTime.now().toString())
+                        .data(of("packages", reabonnementService.getAllPackages()
+                        ))
+                        .message("All Packages")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+
+    @GetMapping("/packages/{packageId}/structured")
+    public ResponseEntity<HttpResponse> getPackageDetailsStructured(
+            @PathVariable(name = "packageId") String packageId) {
+
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(LocalDateTime.now().toString())
+                        .data(Map.of("packageDetails", reabonnementService.getPackageDetailsStructured(packageId)))
+                        .message("Package details retrieved successfully")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build()
+        );
+    }
+
     @PostMapping("/reabonnement")
-    public ResponseEntity<HttpResponse> reabonner(Authentication authentication,
-                                                  @RequestBody ReabonnementRequest request) {
+    public ResponseEntity<HttpResponse> reabonner(@RequestBody ReabonnementRequest request) {
         long startTime = System.currentTimeMillis();
 
         try {
@@ -142,67 +236,33 @@ public class ReabonnementController {
         }
     }
 
-    @PostMapping("/check-decoder")
-    public ResponseEntity<?> verifierAbonne(@RequestParam String numAbonne) {
-        long startTime = System.currentTimeMillis();
-
-        try {
-            Optional<Map<String, Object>> infos = reabonnementService.rechercherInfosAbonne(numAbonne);
-            long duration = System.currentTimeMillis() - startTime;
-
-            if (infos.isPresent()) {
-                Map<String, Object> data = new HashMap<>(infos.get());
-
-                // Ajouter les métadonnées standard
-                data.put("existe", true);
-                data.put("source", "verification");
-                data.put("dureeExecution", duration + "ms");
-
-                // Gérer le message selon le nombre de résultats
-                @SuppressWarnings("unchecked")
-                List<Map<String, String>> resultats = (List<Map<String, String>>) data.get("resultats");
-
-                if (resultats != null) {
-                    int count = resultats.size();
-                    if (count == 1) {
-                        data.put("message", "Abonné trouvé");
-                        // Pour la rétrocompatibilité, ajouter les infos du premier résultat au niveau racine
-                        data.putAll(resultats.get(0));
-                    } else {
-                        data.put("message", count + " abonnés trouvés");
-                    }
-                } else {
-                    data.put("message", "Abonné trouvé");
-                }
-
-                return ResponseEntity.ok(data);
-
-            } else {
-                return ResponseEntity.ok(Map.of(
-                        "existe", false,
-                        "message", "Aucun abonné correspondant trouvé",
-                        "source", "verification",
-                        "dureeExecution", duration + "ms",
-                        "query", numAbonne,
-                        "nombre_resultats", 0
-                ));
-            }
-
-        } catch (Exception e) {
-            log.error("Erreur vérification abonné '{}': {}", numAbonne, e.getMessage());
-
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of(
-                            "existe", false,
-                            "error", true,
-                            "message", "Erreur lors de la vérification",
-                            "details", e.getMessage()
-                    ));
-        }
+    @PostMapping("/addTransactions")
+    public ResponseEntity<HttpResponse> addTransactions(@RequestBody TransactionDto transactionDto)
+    {
+         reabonnementService.addTransaction(transactionDto);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(LocalDateTime.now().toString())
+                        .data(of())
+                        .message("Transaction Added Successfully")
+                        .status(CREATED)
+                        .statusCode(CREATED.value())
+                        .build());
     }
 
+    @GetMapping("/allTransactions/{userId}")
+    public ResponseEntity<HttpResponse> allTransactions() {
 
-
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(LocalDateTime.now().toString())
+                        .data(of("transactions",reabonnementService.getAllTransactionByUserId()
+                        ))
+                        .message("Toutes les transactions")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
 
     @GetMapping("/cache/stats")
     public ResponseEntity<?> getCacheStats() {
@@ -217,8 +277,6 @@ public class ReabonnementController {
                         abonneCache.isEmpty() ? 0 : (validEntries * 100.0 / abonneCache.size()))
         ));
     }
-
-
 
     @Async
     protected void cleanupCacheAsync() {
