@@ -270,7 +270,7 @@ public class ReabonnementController {
                         .build());
     }
 
-    @GetMapping("/allTransactions/{userId}")
+    @GetMapping("/allTransactions")
     public ResponseEntity<HttpResponse> allTransactions() {
 
         return ResponseEntity.ok().body(
@@ -278,6 +278,7 @@ public class ReabonnementController {
                         .timeStamp(LocalDateTime.now().toString())
                         .data(of("transactions",reabonnementService.getAllTransactionByUserId()
                         ))
+
                         .message("Toutes les transactions")
                         .status(OK)
                         .statusCode(OK.value())
