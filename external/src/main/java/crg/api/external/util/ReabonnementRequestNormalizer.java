@@ -5,15 +5,13 @@ import crg.api.external.dto.reabo.ReabonnementRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-
 import java.util.HashMap;
 import java.util.Map;
 
 @Component
 @Slf4j
 public class ReabonnementRequestNormalizer {
+
     // Mapping complet des alias d'offres
     private static final Map<String, String> OFFRE_ALIASES = new HashMap<>() {{
         // Format snake_case
@@ -40,7 +38,7 @@ public class ReabonnementRequestNormalizer {
         put("TOUT CANAL+", "TOUT CANAL+");
     }};
 
-    // Mapping des alias d'options
+    // Mapping des alias d'options (inchangé)
     private static final Map<String, String> OPTION_ALIASES = new HashMap<>() {{
         // Options vides
         put("", "SANS_OPTION");
@@ -90,24 +88,41 @@ public class ReabonnementRequestNormalizer {
         put("nfx4smdd", "NETFLIX4");
     }};
 
-    // Mapping des durées
+    // CORRECTION ICI : Mapping des durées - TOUJOURS EN ANGLAIS
     private static final Map<String, String> DUREE_ALIASES = new HashMap<>() {{
-        put("1", "1 mois");
-        put("3", "3 mois");
-        put("6", "6 mois");
-        put("12", "12 mois");
-        put("1_month", "1 mois");
-        put("3_months", "3 mois");
-        put("6_months", "6 mois");
-        put("12_months", "12 mois");
-        put("1 month", "1 mois");
-        put("3 months", "3 mois");
-        put("6 months", "6 mois");
-        put("12 months", "12 mois");
-        put("1 mois", "1 mois");
-        put("3 mois", "3 mois");
-        put("6 mois", "6 mois");
-        put("12 mois", "12 mois");
+        // Format numérique simple
+        put("1", "1 month");
+        put("3", "3 months");
+        put("6", "6 months");
+        put("12", "12 months");
+
+        // Formats français -> anglais (IMPORTANT!)
+        put("1 mois", "1 month");
+        put("3 mois", "3 months");
+        put("6 mois", "6 months");
+        put("12 mois", "12 months");
+
+        // Format underscore
+        put("1_month", "1 month");
+        put("3_months", "3 months");
+        put("6_months", "6 months");
+        put("12_months", "12 months");
+        put("1_mois", "1 month");
+        put("3_mois", "3 months");
+        put("6_mois", "6 months");
+        put("12_mois", "12 months");
+
+        // Format déjà en anglais
+        put("1 month", "1 month");
+        put("3 months", "3 months");
+        put("6 months", "6 months");
+        put("12 months", "12 months");
+
+        // Années
+        put("1 an", "12 months");
+        put("1 année", "12 months");
+        put("1 year", "12 months");
+        put("1an", "12 months");
     }};
 
     /**
@@ -135,7 +150,7 @@ public class ReabonnementRequestNormalizer {
             request.setOption("SANS_OPTION");
         }
 
-        // Normaliser la durée
+        // IMPORTANT : Normaliser la durée EN ANGLAIS
         if (request.getDuree() != null) {
             String dureeNormalized = normalizeDuree(request.getDuree());
             request.setDuree(dureeNormalized);
@@ -152,13 +167,10 @@ public class ReabonnementRequestNormalizer {
      */
     private String normalizeOffre(String offre) {
         if (offre == null || offre.trim().isEmpty()) {
-            return "ACCESS"; // Valeur par défaut
+            return "ACCESS";
         }
 
-        // Nettoyer et convertir en lowercase
         String cleaned = offre.trim().toLowerCase();
-
-        // Chercher dans les alias
         String normalized = OFFRE_ALIASES.get(cleaned);
 
         if (normalized != null) {
@@ -173,7 +185,6 @@ public class ReabonnementRequestNormalizer {
             return normalized;
         }
 
-        // Si toujours pas trouvé, retourner en uppercase
         log.warn("⚠️ Offre '{}' non reconnue, utilisation telle quelle en majuscules", offre);
         return offre.toUpperCase();
     }
@@ -186,10 +197,7 @@ public class ReabonnementRequestNormalizer {
             return "SANS_OPTION";
         }
 
-        // Nettoyer et convertir en lowercase
         String cleaned = option.trim().toLowerCase();
-
-        // Chercher dans les alias
         String normalized = OPTION_ALIASES.get(cleaned);
 
         if (normalized != null) {
@@ -204,37 +212,62 @@ public class ReabonnementRequestNormalizer {
             return normalized;
         }
 
-        // Si toujours pas trouvé, retourner en uppercase
         log.warn("⚠️ Option '{}' non reconnue, utilisation telle quelle en majuscules", option);
         return option.toUpperCase();
     }
 
     /**
-     * Normalise la durée
+     * CORRECTION : Normalise la durée - TOUJOURS retourner en ANGLAIS
      */
     private String normalizeDuree(String duree) {
         if (duree == null || duree.trim().isEmpty()) {
-            return "1 mois"; // Valeur par défaut
+            return "1 month"; // Par défaut EN ANGLAIS
         }
 
-        // Nettoyer
         String cleaned = duree.trim().toLowerCase();
 
         // Chercher dans les alias
         String normalized = DUREE_ALIASES.get(cleaned);
 
         if (normalized != null) {
+            log.debug("✅ Durée normalisée: '{}' → '{}'", duree, normalized);
             return normalized;
         }
 
-        // Si c'est juste un nombre, ajouter "mois"
+        // Si c'est juste un nombre, convertir en anglais
         if (cleaned.matches("\\d+")) {
-            return cleaned + " mois";
+            int value = Integer.parseInt(cleaned);
+            switch (value) {
+                case 1:
+                    return "1 month";
+                case 3:
+                    return "3 months";
+                case 6:
+                    return "6 months";
+                case 12:
+                    return "12 months";
+                default:
+                    return value + " months";
+            }
         }
 
-        // Retourner tel quel si non reconnu
-        log.warn("⚠️ Durée '{}' non reconnue, utilisation telle quelle", duree);
-        return duree;
+        // Si contient "mois", remplacer par "month(s)"
+        if (cleaned.contains("mois")) {
+            // Extraire le nombre
+            String numberPart = cleaned.replaceAll("[^0-9]", "");
+            if (!numberPart.isEmpty()) {
+                int value = Integer.parseInt(numberPart);
+                if (value == 1) {
+                    return "1 month";
+                } else {
+                    return value + " months";
+                }
+            }
+        }
+
+        // Valeur par défaut si non reconnu
+        log.warn("⚠️ Durée '{}' non reconnue, utilisation de '1 month' par défaut", duree);
+        return "1 month";
     }
 
     /**
