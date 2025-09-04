@@ -5,6 +5,7 @@ import crg.api.external.dto.reabo.ReabonnementRequest;
 import crg.api.external.dto.reabo.TransactionDto;
 import crg.api.external.dto.reabo.UserFavoriteDecoderDto;
 import crg.api.external.service.ReabonnementService;
+import crg.api.external.util.ReabonnementRequestNormalizer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -32,6 +33,8 @@ import static org.springframework.http.HttpStatus.OK;
 public class ReabonnementController {
 
     private final ReabonnementService reabonnementService;
+
+    private final ReabonnementRequestNormalizer normalizer;
 
     // Cache simple pour les vérifications d'abonnés (TTL 5 minutes)
     private final Map<String, CacheEntry<Map<String, Object>>> abonneCache = new ConcurrentHashMap<>();
@@ -147,6 +150,23 @@ public class ReabonnementController {
         long startTime = System.currentTimeMillis();
 
         try {
+            request = normalizer.normalize(request);
+            // Vérifier la validité de la combinaison
+            if (!normalizer.isValidCombination(request.getOffre(), request.getOption())) {
+                return ResponseEntity.status(400)
+                        .body(HttpResponse.builder()
+                                .timeStamp(now().toString())
+                                .data(Map.of(
+                                        "erreur", "Combinaison offre/option invalide",
+                                        "offre", request.getOffre(),
+                                        "option", request.getOption()
+                                ))
+                                .message("Cette option n'est pas disponible pour cette offre")
+                                .status(org.springframework.http.HttpStatus.BAD_REQUEST)
+                                .statusCode(400)
+                                .build());
+            }
+
             String statut = reabonnementService.effectuerReabonnement(request);
             long duration = System.currentTimeMillis() - startTime;
             log.info("✅ Réabonnement terminé en {}ms - Statut: {}", duration, statut);
