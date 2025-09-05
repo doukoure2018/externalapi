@@ -4,6 +4,7 @@ import crg.api.external.domain.HttpResponse;
 import crg.api.external.dto.reabo.ReabonnementRequest;
 import crg.api.external.dto.reabo.TransactionDto;
 import crg.api.external.dto.reabo.UserFavoriteDecoderDto;
+import crg.api.external.exception.SubscriberPhoneNotFoundException;
 import crg.api.external.service.ReabonnementService;
 import crg.api.external.util.ReabonnementRequestNormalizer;
 import lombok.RequiredArgsConstructor;
@@ -173,7 +174,23 @@ public class ReabonnementController {
 
             // Invalider le cache pour cet abonné
             abonneCache.remove(request.getNumAbonne());
-
+            // NOUVEAU CAS : Numéro de téléphone non trouvé
+            if (statut.contains("Numéro de téléphone de l'abonné non trouvé")) {
+                return ResponseEntity.status(422) // 422 Unprocessable Entity
+                        .body(HttpResponse.builder()
+                                .timeStamp(now().toString())
+                                .data(Map.of(
+                                        "resultat", statut,
+                                        "errorCode", "SUBSCRIBER_PHONE_NOT_FOUND",
+                                        "errorType", "NUMERO_ABONNE_INTROUVABLE",
+                                        "decodeur", request.getNumAbonne(),
+                                        "dureeExecution", duration + "ms"
+                                ))
+                                .message("Numéro de téléphone non trouvé pour ce décodeur. Le SMS de confirmation ne peut pas être envoyé.")
+                                .status(HttpStatus.UNPROCESSABLE_ENTITY)
+                                .statusCode(422)
+                                .build());
+            }
             // Vérifier si c'est une erreur de solde insuffisant
             if (statut.contains("Solde insuffisant")) {
                 return ResponseEntity.status(402) // 402 Payment Required
@@ -223,6 +240,25 @@ public class ReabonnementController {
             long duration = System.currentTimeMillis() - startTime;
             log.error("❌ Erreur réabonnement après {}ms", duration, e);
 
+            // Gérer l'exception SubscriberPhoneNotFoundException
+            if (e instanceof SubscriberPhoneNotFoundException ||
+                    (e.getMessage() != null && e.getMessage().contains("Numéro de téléphone de l'abonné non trouvé"))) {
+
+                return ResponseEntity.status(422)
+                        .body(HttpResponse.builder()
+                                .timeStamp(now().toString())
+                                .data(Map.of(
+                                        "erreur", "Numéro de téléphone non trouvé",
+                                        "errorCode", "SUBSCRIBER_PHONE_NOT_FOUND",
+                                        "errorType", "NUMERO_ABONNE_INTROUVABLE",
+                                        "dureeExecution", duration + "ms"
+                                ))
+                                .message("Numéro de téléphone de l'abonné non trouvé dans le système Canal+")
+                                .status(HttpStatus.UNPROCESSABLE_ENTITY)
+                                .statusCode(422)
+                                .build());
+            }
+
             // Gérer spécifiquement l'exception de solde insuffisant
             if (e.getMessage() != null &&
                     (e.getMessage().contains("SOLDE_INSUFFISANT") ||
@@ -271,14 +307,13 @@ public class ReabonnementController {
     }
 
     @GetMapping("/allTransactions")
-    public ResponseEntity<HttpResponse> allTransactions() {
-
+    public ResponseEntity<HttpResponse> allTransactions()
+    {
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
                         .timeStamp(LocalDateTime.now().toString())
                         .data(of("transactions",reabonnementService.getAllTransactionByUserId()
                         ))
-
                         .message("Toutes les transactions")
                         .status(OK)
                         .statusCode(OK.value())

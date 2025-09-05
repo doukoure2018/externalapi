@@ -7,6 +7,7 @@ import crg.api.external.dto.reabo.PackageDetailsResponse;
 import crg.api.external.dto.reabo.ReabonnementRequest;
 import crg.api.external.dto.reabo.TransactionDto;
 import crg.api.external.enumeration.ValidationStatus;
+import crg.api.external.exception.SubscriberPhoneNotFoundException;
 import crg.api.external.repository.AccessRepository;
 import crg.api.external.repository.ReabonnementRepository;
 import crg.api.external.service.OrangeSmsService;
@@ -326,10 +327,27 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
             // 5.1 Extraction du téléphone de l'abonné
             subscriberPhone = extractSubscriberPhone(driver, js);
-            if (subscriberPhone != null) {
-                slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
-                        "Numéro abonné: " + subscriberPhone);
+            if (subscriberPhone == null || subscriberPhone.isEmpty()) {
+                log.error("❌ Numéro de téléphone de l'abonné non trouvé pour le décodeur {}", req.getNumAbonne());
+
+                // Notification Slack
+                slackService.sendReabonnementError(req, "PHONE_NOT_FOUND",
+                        "Numéro de téléphone de l'abonné non trouvé");
+
+                // Créer et sauvegarder la transaction échouée
+                transaction = createTransaction(req, "N/A", null, null,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("PHONE_NOT_FOUND: Numéro de téléphone de l'abonné non trouvé");
+                saveTransaction(transaction);
+
+                // Lancer l'exception pour arrêter le processus
+                throw new SubscriberPhoneNotFoundException("Numéro de téléphone de l'abonné non trouvé pour le décodeur: " + req.getNumAbonne());
             }
+
+            // Si le numéro existe, continuer normalement
+            log.info("✅ Numéro de téléphone trouvé: {}", subscriberPhone);
+            slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
+                    "Numéro abonné: " + subscriberPhone);
 
             // 5.2 Extraction des données de facture
             Map<String, Object> invoiceData = extractInvoiceData(driver, js);
@@ -384,6 +402,17 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
             needReturn = true;
             return "Réabonnement effectué avec succès !";
+
+        }catch (SubscriberPhoneNotFoundException e) {
+            // CAS SPÉCIFIQUE : Numéro de téléphone non trouvé
+            log.error("❌ Numéro de téléphone non trouvé: {}", e.getMessage());
+
+            slackService.sendReabonnementError(req, "PHONE_NOT_FOUND", e.getMessage());
+
+            // Transaction déjà sauvegardée avant de lancer l'exception
+            needReturn = false; // Important pour ne pas retourner le driver au pool
+
+            return "Erreur : Numéro de téléphone de l'abonné non trouvé. Le réabonnement ne peut pas être effectué sans le numéro de l'abonné.";
 
         } catch (Exception e) {
             log.error("Erreur réabonnement", e);
