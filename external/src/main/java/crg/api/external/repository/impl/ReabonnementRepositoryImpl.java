@@ -130,7 +130,7 @@ public class ReabonnementRepositoryImpl implements ReabonnementRepository {
     }
 
     @Override
-    public List<TransactionDto> getAllTransactionByUserId() {
+    public List<TransactionDto> getAllTransactions() {
         try {
             return jdbcClient.sql(SELECT_TRANSACTION).query(TransactionDto.class).list();
         }catch (EmptyResultDataAccessException exception) {
@@ -156,6 +156,7 @@ public class ReabonnementRepositoryImpl implements ReabonnementRepository {
                 .addValue("subscriptionEndDate", transaction.getSubscriptionEndDate())
                 .addValue("canalUsername", transaction.getCanalUsername())
                 .addValue("processingDurationMs", transaction.getProcessingDurationMs())
-                .addValue("errorMessage", transaction.getErrorMessage());
+                .addValue("errorMessage", transaction.getErrorMessage())
+                .addValue("phoneNumber", transaction.getPhoneNumber());
     }
 }

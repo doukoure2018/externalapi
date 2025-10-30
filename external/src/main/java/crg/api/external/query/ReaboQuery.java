@@ -93,13 +93,13 @@ public class ReaboQuery {
                 decoder_number, package_id, language_option_id,
                 duration_id, amount_gnf, transaction_date, status,
                 payment_method, reference_number, subscription_start_date, subscription_end_date,
-                canal_username,processing_duration_ms,error_message
+                canal_username,processing_duration_ms,error_message,phone_number
             )
             VALUES(
                 :decoderNumber, :packageId, :languageOptionId,
                 :durationId, :amountGnf, :transactionDate, :status,
                 :paymentMethod, :referenceNumber, :subscriptionStartDate, :subscriptionEndDate,
-                :canalUsername,:processingDurationMs,:errorMessage
+                :canalUsername,:processingDurationMs,:errorMessage,:phoneNumber
             )
             """;
 

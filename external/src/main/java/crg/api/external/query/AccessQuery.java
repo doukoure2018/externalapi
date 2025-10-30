@@ -30,4 +30,12 @@ public class AccessQuery {
 
     public static final String FIND_ACCESS_BY_ID_QUERY = "SELECT id, username, password, createdAt, start_date, end_date FROM accesscanal WHERE id = :id";
 
+
+    public static final String FIND_ALL_ACTIVE_ACCESS_QUERY =
+            """
+            SELECT id, username, password, createdAt, start_date, end_date, last_used_at
+            FROM accesscanal
+            WHERE end_date >= CURRENT_DATE
+            ORDER BY last_used_at ASC NULLS FIRST
+            """;
 }

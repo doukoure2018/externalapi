@@ -1,6 +1,5 @@
 package crg.api.external.dto.reabo;
 
-import jakarta.persistence.Transient;
 import lombok.*;
 
 import java.time.LocalDate;
@@ -24,18 +23,10 @@ public class TransactionDto {
     private String referenceNumber;
     private LocalDate subscriptionStartDate;  // Ajouté pour votre table
     private LocalDate subscriptionEndDate;    // Existant
-
-    // Ces champs peuvent être transients si pas dans la table
-    @Transient
-    private String firstName;
-    @Transient
-    private String lastName;
-    @Transient
-    private String phone;
-
     private String canalUsername;
     // Optionnel : champs supplémentaires pour monitoring
     private Integer processingDurationMs;
     private String errorMessage;
+    private String phoneNumber;
 }
 

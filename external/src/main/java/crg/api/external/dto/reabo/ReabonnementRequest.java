@@ -14,4 +14,5 @@ public class ReabonnementRequest {
     private String offre;
     private String duree;
     private String option;
+    private String phoneNumber;
 }

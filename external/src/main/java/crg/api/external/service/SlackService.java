@@ -4,7 +4,9 @@ import crg.api.external.dto.reabo.ReabonnementRequest;
 
 public interface SlackService {
     void sendSearchingDecoder(String decoderNumber);
+    void sendLoginSuccess(String username);
     void sendDecoderFound(String decoderNumber, boolean found);
+    void sendReabonnementStart(ReabonnementRequest request);
     void sendReabonnementProgress(String step, String details);
     void sendReabonnementSuccess(ReabonnementRequest request, String montant, String reference);
     void sendValidationStatus(String status, String details);

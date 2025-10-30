@@ -23,6 +23,7 @@ import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.openqa.selenium.*;
+import org.openqa.selenium.NoSuchElementException;
 import org.openqa.selenium.TimeoutException;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
@@ -241,7 +242,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
     private void configureDriver(WebDriver driver) {
         driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(3));
-        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(20));
+        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(60));
         driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(10));
     }
 
@@ -251,7 +252,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         log.info("🚀 DÉBUT RÉABONNEMENT pour abonné {}", req.getNumAbonne());
 
         // Variables déclarées au niveau méthode
-        AccessDto accessDto = null;
         WebDriver driver = null;
         JavascriptExecutor js = null;
         WebDriverWait wait = null;
@@ -265,7 +265,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         LocalDate subscriptionEndDate = null;
         long processingDuration = 0;
 
-        // SLACK: Notification de début (sans user)
+        // SLACK: Notification de début
         slackService.sendReabonnementProgress("START",
                 String.format("Démarrage réabonnement - Décodeur: %s, Offre: %s %s, Option: %s",
                         req.getNumAbonne(), req.getOffre(), req.getDuree(),
@@ -273,8 +273,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
         try {
             // ========== PHASE 1: INITIALISATION ==========
-
-            // 1.1 Login avec rotation des comptes Canal+
             driver = getOrCreateDriver();
             if (driver == null) {
                 slackService.sendReabonnementError(req, "DRIVER_ERROR",
@@ -285,28 +283,19 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             js = (JavascriptExecutor) driver;
             wait = new WebDriverWait(driver, Duration.ofSeconds(10));
 
-            // ========== PHASE 2: LOGIN AVEC ROTATION 2FA ==========
+            // ========== PHASE 2: LOGIN ==========
             slackService.sendReabonnementProgress("LOGIN", "Connexion au système Canal+...");
-
-            // Utiliser la méthode performFastLogin qui gère déjà la rotation
             performFastLogin(driver, js);
 
-            // Récupérer le compte utilisé après login réussi
-            // (La méthode performFastLogin aura déjà géré la rotation et le 2FA)
-
             // ========== PHASE 3: RECHERCHE ABONNÉ ==========
-
             slackService.sendSearchingDecoder(req.getNumAbonne());
-
             boolean searchSuccess = performRobustSearch(driver, js, wait, req.getNumAbonne());
-
             slackService.sendDecoderFound(req.getNumAbonne(), searchSuccess);
 
             if (!searchSuccess) {
                 slackService.sendReabonnementError(req, "DECODER_NOT_FOUND",
                         "Abonné " + req.getNumAbonne() + " introuvable");
 
-                // Créer la transaction d'échec (sans user_id)
                 transaction = createTransaction(req, montantFinal, null, null,
                         "failed", null, System.currentTimeMillis() - startTime);
                 transaction.setErrorMessage("DECODER_NOT_FOUND");
@@ -316,40 +305,37 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             }
 
             // ========== PHASE 4: CONFIGURATION ==========
-
             slackService.sendReabonnementProgress("SELECTION",
                     String.format("Configuration: %s - %s - %s",
                             req.getOffre(), req.getDuree(), req.getOption()));
 
             performFastSelection(driver, js, wait, req);
 
-            // ========== PHASE 5: EXTRACTION DONNÉES ==========
-
-            // 5.1 Extraction du téléphone de l'abonné
+            // PHASE 5: EXTRACTION DONNÉES (AVANT validation!)
+            log.info("📱 Extraction du numéro de téléphone de l'abonné...");
             subscriberPhone = extractSubscriberPhone(driver, js);
-            if (subscriberPhone == null || subscriberPhone.isEmpty()) {
-                log.error("❌ Numéro de téléphone de l'abonné non trouvé pour le décodeur {}", req.getNumAbonne());
 
-                // Notification Slack
+            if (subscriberPhone == null || subscriberPhone.isEmpty()) {
+                log.error("❌ Numéro de téléphone non trouvé pour le décodeur {}", req.getNumAbonne());
+
                 slackService.sendReabonnementError(req, "PHONE_NOT_FOUND",
                         "Numéro de téléphone de l'abonné non trouvé");
 
-                // Créer et sauvegarder la transaction échouée
                 transaction = createTransaction(req, "N/A", null, null,
                         "failed", null, System.currentTimeMillis() - startTime);
-                transaction.setErrorMessage("PHONE_NOT_FOUND: Numéro de téléphone de l'abonné non trouvé");
+                transaction.setErrorMessage("PHONE_NOT_FOUND");
                 saveTransaction(transaction);
 
-                // Lancer l'exception pour arrêter le processus
-                throw new SubscriberPhoneNotFoundException("Numéro de téléphone de l'abonné non trouvé pour le décodeur: " + req.getNumAbonne());
+                throw new SubscriberPhoneNotFoundException(
+                        "Numéro de téléphone non trouvé pour le décodeur: " + req.getNumAbonne());
             }
 
-            // Si le numéro existe, continuer normalement
             log.info("✅ Numéro de téléphone trouvé: {}", subscriberPhone);
             slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
                     "Numéro abonné: " + subscriberPhone);
 
-            // 5.2 Extraction des données de facture
+            // Extraction montant/dates
+            log.info("💰 Extraction des données de facture...");
             Map<String, Object> invoiceData = extractInvoiceData(driver, js);
             montantFinal = (String) invoiceData.get("montant");
             subscriptionStartDate = (LocalDate) invoiceData.get("dateDebut");
@@ -359,12 +345,32 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 slackService.sendReabonnementProgress("MONTANT", "Montant: " + montantFinal);
             }
 
-            // ========== PHASE 6: VALIDATION ==========
-
+           // PHASE 6: VALIDATION (APRÈS extraction!)
             slackService.sendReabonnementProgress("VALIDATION", "Validation en cours...");
 
             boolean validationSuccess = performValidationWithConfirmation(driver, js, wait);
 
+
+
+            // Vérification immédiate des erreurs (payment mean géré automatiquement dans checkForErrors)
+            String immediateErrorCheck = checkForErrors(driver, wait);
+            if (immediateErrorCheck != null) {
+                log.error("❌ ERREUR DÉTECTÉE: {}", immediateErrorCheck);
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("VALIDATION_ERROR: " + immediateErrorCheck);
+                saveTransaction(transaction);
+
+                slackService.sendReabonnementError(req, "VALIDATION_ERROR",
+                        "Erreur de validation - " + immediateErrorCheck);
+
+                needReturn = false;
+                return "ERREUR: Échec de validation. " + immediateErrorCheck;
+            }
+
+            // Vérification du succès de validation (après vérification erreur immédiate)
             if (!validationSuccess) {
                 String errorCheck = checkForErrors(driver, wait);
                 if (errorCheck != null) {
@@ -384,14 +390,12 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             slackService.sendValidationStatus("SUCCESS",
                     String.format("Confirmé en %dms", processingDuration));
 
-            // Créer et sauvegarder la transaction de succès
             transaction = createTransaction(req, montantFinal,
                     subscriptionStartDate, subscriptionEndDate,
                     "completed", null, processingDuration);
 
             saveTransaction(transaction);
 
-            // Notifications de succès
             slackService.sendReabonnementSuccess(req, montantFinal,
                     transaction.getReferenceNumber());
 
@@ -403,72 +407,37 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             needReturn = true;
             return "Réabonnement effectué avec succès !";
 
-        }catch (SubscriberPhoneNotFoundException e) {
-            // CAS SPÉCIFIQUE : Numéro de téléphone non trouvé
+        } catch (SubscriberPhoneNotFoundException e) {
             log.error("❌ Numéro de téléphone non trouvé: {}", e.getMessage());
-
             slackService.sendReabonnementError(req, "PHONE_NOT_FOUND", e.getMessage());
-
-            // Transaction déjà sauvegardée avant de lancer l'exception
-            needReturn = false; // Important pour ne pas retourner le driver au pool
-
-            return "Erreur : Numéro de téléphone de l'abonné non trouvé. Le réabonnement ne peut pas être effectué sans le numéro de l'abonné.";
+            needReturn = false;
+            return "Erreur : Numéro de téléphone de l'abonné non trouvé. " +
+                    "Le réabonnement ne peut pas être effectué sans le numéro de l'abonné.";
 
         } catch (Exception e) {
             log.error("Erreur réabonnement", e);
+
             String errorMsg = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
 
             // ========== GESTION DES CAS D'ERREUR SPÉCIFIQUES ==========
 
-            // CAS 1: ERREUR OPTION/PAYMENT MEAN
+            // CAS 1: ERREUR OPTION/PAYMENT MEAN (déjà géré par checkForErrors, mais au cas où)
             if (errorMsg.contains("OPTION_NON_SELECTIONNEE") ||
-                    errorMsg.contains("payment mean") ||
-                    errorMsg.contains("Please select payment mean")) {
+                    errorMsg.contains("PAYMENT_MEAN_ERROR")) {
 
-                log.warn("⚠️ Erreur option/payment mean détectée, vérification du succès réel...");
+                log.error("❌ Erreur de configuration - Réabonnement annulé");
 
-                try {
-                    Thread.sleep(5000);
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("CONFIG_ERROR: " + errorMsg);
+                saveTransaction(transaction);
 
-                    if (driver != null) {
-                        String currentUrl = driver.getCurrentUrl();
-                        boolean hasSuccess = isSuccessMessageDisplayed(driver);
+                slackService.sendReabonnementError(req, "CONFIG_ERROR",
+                        "Configuration incorrecte");
 
-                        if (!currentUrl.contains("search-subscriber") ||
-                                currentUrl.contains("success") ||
-                                currentUrl.contains("confirmation") ||
-                                currentUrl.contains("reports") ||
-                                hasSuccess) {
-
-                            log.info("✅ Succès confirmé malgré l'erreur payment mean!");
-
-                            transaction = createTransaction(req, montantFinal,
-                                    subscriptionStartDate, subscriptionEndDate,
-                                    "completed", null, System.currentTimeMillis() - startTime);
-                            saveTransaction(transaction);
-
-                            slackService.sendReabonnementSuccess(req, montantFinal,
-                                    transaction.getReferenceNumber());
-
-                            needReturn = true;
-                            return "Réabonnement effectué avec succès !";
-                        }
-                    }
-
-                    // Si vraiment une erreur
-                    transaction = createTransaction(req, montantFinal,
-                            subscriptionStartDate, subscriptionEndDate,
-                            "failed", null, System.currentTimeMillis() - startTime);
-                    transaction.setErrorMessage("OPTION_NON_SELECTIONNEE");
-                    saveTransaction(transaction);
-
-                    slackService.sendReabonnementError(req, "OPTION_ERROR",
-                            "Erreur de sélection d'option - Payment mean non sélectionné");
-                    return "Erreur : Option non sélectionnée correctement (payment mean)";
-
-                } catch (Exception ex) {
-                    log.error("Erreur vérification: {}", ex.getMessage());
-                }
+                needReturn = false;
+                return "ERREUR: Configuration incorrecte. Veuillez réessayer.";
             }
 
             // CAS 2: Solde insuffisant
@@ -484,41 +453,52 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 transaction.setErrorMessage("SOLDE_INSUFFISANT");
                 saveTransaction(transaction);
 
-                return "Erreur : Solde insuffisant sur votre compte distributeur.";
+                needReturn = false;
+                return "Erreur : Solde insuffisant sur votre compte distributeur. " +
+                        "Veuillez recharger votre compte.";
             }
 
-            // CAS 3: Timeout
+            // CAS 3: Timeout avec message spécifique
+            if (errorMsg.contains("Aucune confirmation de paiement après validation")) {
+
+                log.error("❌ ÉCHEC: Timeout sans confirmation de paiement");
+
+                slackService.sendReabonnementError(req, "TIMEOUT_NO_PAYMENT_CONFIRMATION",
+                        "Timeout sans confirmation de paiement - Réabonnement échoué");
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("TIMEOUT_NO_PAYMENT_CONFIRMATION");
+                saveTransaction(transaction);
+
+                needReturn = false;
+                return "Erreur : Aucune confirmation de paiement reçue. " +
+                        "Le réabonnement n'a pas été effectué. " +
+                        "Vérifiez le statut dans votre compte Canal+ ou contactez le support au 622459305.";
+            }
+
+            // CAS 4: Autres timeouts génériques
             if (errorMsg.contains("Aucune confirmation reçue") ||
                     errorMsg.contains("timeout") ||
                     errorMsg.contains("Timeout")) {
 
-                log.warn("⏱️ Timeout de confirmation détecté - Vérification...");
+                log.error("❌ Timeout détecté - Traité comme échec par sécurité");
 
-                try {
-                    Thread.sleep(3000);
+                slackService.sendReabonnementError(req, "TIMEOUT_ERROR", errorMsg);
 
-                    String errorCheck = checkForErrors(driver, wait);
-                    if (errorCheck == null || errorCheck.equals("ERREUR_INCONNUE")) {
-                        // Probable succès
-                        log.info("✅ Timeout sans erreur = succès présumé");
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("TIMEOUT_ERROR: " + errorMsg);
+                saveTransaction(transaction);
 
-                        transaction = createTransaction(req, montantFinal,
-                                subscriptionStartDate, subscriptionEndDate,
-                                "completed", null, System.currentTimeMillis() - startTime);
-                        saveTransaction(transaction);
-
-                        slackService.sendReabonnementSuccess(req, montantFinal,
-                                transaction.getReferenceNumber());
-
-                        needReturn = true;
-                        return "Réabonnement effectué avec succès !";
-                    }
-                } catch (Exception ex) {
-                    log.debug("Erreur vérification timeout: {}", ex.getMessage());
-                }
+                needReturn = false;
+                return "Erreur technique : Timeout. " +
+                        "Vérifiez le statut de l'abonnement ou contactez le support au 622459305.";
             }
 
-            // CAS 4: Abonné introuvable
+            // CAS 5: Abonné introuvable
             if (errorMsg.contains("introuvable")) {
                 slackService.sendReabonnementError(req, "DECODER_NOT_FOUND", errorMsg);
 
@@ -528,29 +508,77 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 transaction.setErrorMessage("DECODER_NOT_FOUND");
                 saveTransaction(transaction);
 
+                needReturn = false;
                 return "Erreur : " + errorMsg;
             }
 
+            // CAS 6: Erreur DTA
+            if (errorMsg.contains("ERREUR_DTA") || errorMsg.contains("DTA-")) {
+                slackService.sendReabonnementError(req, "ERREUR_DTA", errorMsg);
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("ERREUR_DTA: " + errorMsg);
+                saveTransaction(transaction);
+
+                needReturn = false;
+                return "Erreur : " + errorMsg;
+            }
+
+            // CAS 7: Erreur ERROR générique
+            if (errorMsg.contains("ERROR")) {
+                slackService.sendReabonnementError(req, "ERREUR_SYSTEME", errorMsg);
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "failed", null, System.currentTimeMillis() - startTime);
+                transaction.setErrorMessage("ERREUR_SYSTEME: " + errorMsg);
+                saveTransaction(transaction);
+
+                needReturn = false;
+                return "Erreur système : " + errorMsg + ". " +
+                        "Veuillez réessayer ou contactez le support au 622459305.";
+            }
+
             // CAS GÉNÉRAL: Erreur technique
+            log.error("❌ Erreur technique: {}", errorMsg);
+
             slackService.sendReabonnementError(req, "ERREUR_TECHNIQUE", errorMsg);
 
             transaction = createTransaction(req, montantFinal,
                     subscriptionStartDate, subscriptionEndDate,
                     "failed", null, System.currentTimeMillis() - startTime);
-            transaction.setErrorMessage(errorMsg);
+            transaction.setErrorMessage("ERREUR_TECHNIQUE: " + errorMsg);
             saveTransaction(transaction);
 
-            return "Erreur technique - Veuillez réessayer";
+            needReturn = false;
+            return "Erreur technique - Veuillez réessayer. " +
+                    "Si le problème persiste, contactez le support au 622459305.";
 
         } finally {
             // Nettoyage des ressources
             if (driver != null) {
-                if (needReturn) {
-                    driverPool.offer(driver);
-                } else {
-                    try { driver.quit(); } catch (Exception ignored) {}
+                try {
+                    driver.manage().deleteAllCookies();
+                    driver.get("about:blank");
+
+                    if (needReturn && driverPool.size() < 5) {
+                        driverPool.offer(driver);
+                        log.info("♻️ Driver retourné au pool");
+                    } else {
+                        driver.quit();
+                        log.info("🗑️ Driver fermé");
+                    }
+                } catch (Exception cleanupEx) {
+                    log.warn("⚠️ Erreur nettoyage: {}", cleanupEx.getMessage());
+                    try {
+                        driver.quit();
+                    } catch (Exception ignored) {}
                 }
             }
+
+            log.info("⏱️ Durée totale: {}ms", System.currentTimeMillis() - startTime);
         }
     }
 
@@ -746,8 +774,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
         return null;
     }
-
-
 
 
     // Extraire le montant numérique
@@ -1041,34 +1067,44 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             // 6. Attendre un peu pour s'assurer que tout est bien sélectionné
             Thread.sleep(500);
 
-            // 7. Valider
+            // 7. Valider les sélections
             WebElement validButton = wait.until(ExpectedConditions.elementToBeClickable(VALID_OFFERS));
             js.executeScript("arguments[0].scrollIntoView(true);", validButton);
             Thread.sleep(200);
 
             // Capturer l'état avant validation pour debug
             try {
-                String formState = (String) js.executeScript("""
-                var form = document.querySelector('.form-border');
-                if (!form) return 'Form not found';
-                
-                var duration = form.querySelector('select[name="duration"]');
-                var offer = form.querySelector('select[name="offer"]');
-                var option = form.querySelector('select[name="option"]');
-                
-                return JSON.stringify({
-                    duration: duration ? duration.value + ' = ' + duration.options[duration.selectedIndex].text : 'N/A',
-                    offer: offer ? offer.value + ' = ' + offer.options[offer.selectedIndex].text : 'N/A',
-                    option: option ? option.value + ' = ' + option.options[option.selectedIndex].text : 'N/A'
-                });
-            """);
-                log.info("📸 État du formulaire avant validation: {}", formState);
+                   String formState = (String) js.executeScript("""
+                    var form = document.querySelector('.form-border');
+                    if (!form) return 'Form not found';
+                    
+                    var duration = form.querySelector('select[name="duration"]');
+                    var offer = form.querySelector('select[name="offer"]');
+                    var option = form.querySelector('select[name="option"]');
+                    
+                    return JSON.stringify({
+                        duration: duration ? duration.value + ' = ' + duration.options[duration.selectedIndex].text : 'N/A',
+                        offer: offer ? offer.value + ' = ' + offer.options[offer.selectedIndex].text : 'N/A',
+                        option: option ? option.value + ' = ' + option.options[option.selectedIndex].text : 'N/A'
+                    });
+                """);
+                    log.info("📸 État du formulaire avant validation: {}", formState);
+                } catch (Exception e) {
+                    log.debug("Impossible de capturer l'état du formulaire");
+                }
+
+            // ⭐ AJOUTER CES LIGNES CRITIQUES:
+            try {
+                validButton.click();
+                log.info("✅ Bouton valid-offers cliqué");
             } catch (Exception e) {
-                log.debug("Impossible de capturer l'état du formulaire");
+                // Si le clic échoue, essayer avec JavaScript
+                js.executeScript("arguments[0].click();", validButton);
+                log.info("✅ Bouton valid-offers cliqué (via JavaScript)");
             }
 
-            validButton.click();
-            log.info("✅ Clicked validation button");
+           // Attendre que la validation soit prise en compte
+            Thread.sleep(1500);
 
         } catch (Exception e) {
             log.error("Erreur critique dans performFastSelection", e);
@@ -1123,7 +1159,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 log.info("🎯 Tentative de sélection de l'offre: {} avec valeur: {}", req.getOffre(), offreValue);
                 offerDropdown.selectByValue(offreValue);
                 log.info("✅ Offre sélectionnée par valeur: {}", offreValue);
-                Thread.sleep(1000);
+                Thread.sleep(1500);
 
             } catch (Exception e) {
                 log.warn("⚠️ Erreur sélection offre par valeur, tentative par texte");
@@ -1396,7 +1432,8 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
     }
     private boolean performRobustSearch(WebDriver driver, JavascriptExecutor js,
-                                        WebDriverWait wait, String numAbonne) {
+                                        WebDriverWait wait, String numAbonne)
+    {
         log.info("🔍 Recherche de l'abonné {}...", numAbonne);
 
         try {
@@ -1452,11 +1489,17 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
     }
 
+
+    // SOLUTION DÉFINITIVE - Version corrigée qui cherche le message au bon endroit
     private boolean performValidationWithConfirmation(WebDriver driver, JavascriptExecutor js, WebDriverWait wait) {
         try {
-            log.info("📋 Début de la validation avec attente de confirmation...");
+            log.info("📋 Début de la validation avec attente de confirmation adaptative...");
 
-            // Capturer l'état du formulaire avant validation
+            // Capturer l'URL avant validation
+            String urlBeforeValidation = driver.getCurrentUrl();
+            log.info("📍 URL avant validation: {}", urlBeforeValidation);
+
+            // Capturer l'état du formulaire (optionnel)
             try {
                 String formState = (String) js.executeScript("""
                 var form = {};
@@ -1472,25 +1515,15 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 }
                 if (option) {
                     form.option = option.value + ' = ' + option.options[option.selectedIndex].text;
-                    // Indiquer si SANS_OPTION (value vide ou "Choisir...")
-                    if (option.value === '' || option.options[option.selectedIndex].text.includes('Choisir')) {
-                        form.isSansOption = true;
-                    }
                 }
                 return JSON.stringify(form);
             """);
-
                 log.info("📸 État du formulaire avant validation: {}", formState);
-
-                // Parser pour vérifier si SANS_OPTION
-                if (formState != null && formState.contains("\"isSansOption\":true")) {
-                    log.info("✅ Validation avec SANS_OPTION confirmée");
-                }
-
             } catch (Exception e) {
                 log.debug("Impossible de capturer l'état du formulaire: {}", e.getMessage());
             }
 
+            // Trouver et cliquer sur le bouton de validation
             WebElement validationButton = findValidationButton(driver, wait);
             if (validationButton == null) {
                 log.warn("⚠️ Aucun bouton de validation trouvé");
@@ -1500,8 +1533,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             js.executeScript("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", validationButton);
             Thread.sleep(500);
 
-            wait.until(ExpectedConditions.elementToBeClickable(validationButton));
-
             try {
                 validationButton.click();
                 log.info("✅ Bouton de validation cliqué");
@@ -1510,120 +1541,405 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 log.info("✅ Bouton de validation cliqué (JavaScript)");
             }
 
-            log.info("⏳ Attente du résultat...");
-            Thread.sleep(3000);
+            // ATTENTE ADAPTATIVE - Gérer les deux workflows
+            log.info("⏳ Attente du résultat de validation...");
 
-            ValidationResult result = waitForValidationResult(driver, wait);
+            int maxWaitSeconds = 30;
+            boolean successConfirmed = false;
+            boolean onSubscribersPage = false;
+            boolean onInvoicePage = false;
+            boolean pdfOpened = false;
+            String successMessage = null;
+            int redirectionTime = -1;
 
-            switch (result.getStatus()) {
-                case SUCCESS:
-                    log.info("🎉 Validation réussie : {}", result.getMessage());
+            for (int i = 0; i < maxWaitSeconds; i++) {
+                Thread.sleep(1000);
+
+                String currentUrl = driver.getCurrentUrl();
+
+                // WORKFLOW 1: Détection de /subscribers avec message
+                if (!onSubscribersPage && currentUrl.contains("/subscribers")) {
+                    onSubscribersPage = true;
+                    log.info("📍 Redirection vers /subscribers détectée après {}s", i + 1);
+
+                    // Chercher le message de succès sur /subscribers
                     try {
-                        Thread.sleep(1000);
-                        clickContinueButton(driver);
-                    } catch (Exception e) {
-                        log.debug("Bouton Continuer non cliqué: {}", e.getMessage());
-                    }
-                    return true;
+                        WebElement successDiv = driver.findElement(By.className("operation-achieved-div"));
+                        if (successDiv.isDisplayed()) {
+                            successMessage = successDiv.getText();
+                            if (successMessage.contains("Le réabonnement a été fait avec succès")) {
+                                log.info("🎉 MESSAGE DE SUCCÈS trouvé sur /subscribers après {}s", i + 1);
+                                successConfirmed = true;
 
-                case ERROR:
-                    // Vérifier si c'est une erreur liée à l'option
-                    if (result.getMessage() != null &&
-                            result.getMessage().toLowerCase().contains("payment mean")) {
-                        log.warn("⚠️ Erreur 'payment mean' détectée - Vérification si c'est un faux positif...");
+                                // Cliquer sur Continuer si présent
+                                try {
+                                    WebElement continueBtn = driver.findElement(By.cssSelector("button[data-cy='continue-validation']"));
+                                    if (continueBtn.isDisplayed()) {
+                                        continueBtn.click();
+                                        log.info("✅ Bouton 'Continuer' cliqué");
+                                    }
+                                } catch (Exception e) {
+                                    // Ignorer
+                                }
 
-                        Thread.sleep(3000);
-
-                        // Vérifier si malgré l'erreur, le réabonnement est passé
-                        String currentUrl = driver.getCurrentUrl();
-                        if (!currentUrl.contains("search-subscriber") ||
-                                currentUrl.contains("success") ||
-                                currentUrl.contains("confirmation") ||
-                                currentUrl.contains("reports")) {
-                            log.info("✅ Succès confirmé malgré l'erreur payment mean");
-                            return true;
-                        }
-                    }
-
-                    log.error("❌ Erreur de validation : {}", result.getMessage());
-                    throw new RuntimeException(result.getMessage());
-
-                case TIMEOUT:
-                    log.warn("⏱️ Timeout, vérification finale...");
-
-                    // Capturer l'état de la page pour debug
-                    try {
-                        String pageInfo = (String) js.executeScript("""
-                        return JSON.stringify({
-                            url: window.location.href,
-                            title: document.title,
-                            bodyText: document.body.innerText.substring(0, 500),
-                            hasErrors: !!document.querySelector('#sas-alert'),
-                            hasInvoice: !!document.querySelector('[class*="invoice"]'),
-                            visibleButtons: Array.from(document.querySelectorAll('button:not([style*="none"])')).map(b => b.textContent).slice(0, 5)
-                        });
-                    """);
-                        log.info("📸 État de la page au timeout: {}", pageInfo);
-                    } catch (Exception ex) {
-                        log.debug("Impossible de capturer l'état de la page");
-                    }
-
-                    Thread.sleep(3000);
-
-                    // Vérifier d'abord s'il y a une erreur
-                    String errorCheck = checkForErrors(driver, wait);
-                    if (errorCheck != null) {
-                        // Cas spécial : erreur "payment mean" avec SANS_OPTION
-                        if (errorCheck.contains("payment mean") || errorCheck.contains("OPTION_NON_SELECTIONNEE")) {
-                            log.warn("⚠️ Erreur option détectée, vérification du succès réel...");
-
-                            Thread.sleep(2000);
-                            String currentUrl = driver.getCurrentUrl();
-
-                            if (!currentUrl.contains("search-subscriber") ||
-                                    currentUrl.contains("success") ||
-                                    currentUrl.contains("reports") ||
-                                    isSuccessMessageDisplayed(driver)) {
-                                log.info("✅ Succès confirmé malgré l'erreur option");
-                                return true;
+                                break; // Succès confirmé
                             }
                         }
+                    } catch (Exception e) {
+                        // Pas de message, continuer
+                    }
+                }
 
-                        if (!errorCheck.equals("ERREUR_INCONNUE")) {
-                            log.error("❌ Erreur détectée après timeout : {}", errorCheck);
-                            throw new RuntimeException(errorCheck);
+                // WORKFLOW 2: Détection directe de /invoice SANS message
+                if (!onInvoicePage && currentUrl.contains("/invoice")) {
+                    onInvoicePage = true;
+                    redirectionTime = i + 1;
+                    log.info("📍 Redirection vers /invoice détectée après {}s", redirectionTime);
+
+                    // Attendre un peu pour voir si un message apparaît
+                    if (i < 10) {
+                        continue; // Continuer à attendre un peu
+                    }
+                }
+
+                // Recherche générale du message de succès (sur n'importe quelle page)
+                if (!successConfirmed) {
+                    Boolean hasSuccess = (Boolean) js.executeScript("""
+                    var successFound = false;
+                    
+                    // Par classe
+                    var divByClass = document.querySelector('.operation-achieved-div');
+                    if (divByClass && divByClass.innerText.includes('Le réabonnement a été fait avec succès')) {
+                        successFound = true;
+                    }
+                    
+                    // Dans le body
+                    if (document.body.innerText.includes('Le réabonnement a été fait avec succès')) {
+                        successFound = true;
+                    }
+                    
+                    return successFound;
+                """);
+
+                    if (Boolean.TRUE.equals(hasSuccess)) {
+                        log.info("🎉 Message de succès détecté après {}s", i + 1);
+                        successConfirmed = true;
+                        break;
+                    }
+                }
+
+                // Vérifier l'ouverture d'un PDF (signe de succès)
+                if (!pdfOpened && driver.getWindowHandles().size() > 1) {
+                    pdfOpened = true;
+                    log.info("📄 Nouvel onglet détecté (probablement PDF) après {}s", i + 1);
+
+                    // Vérifier si c'est bien un PDF
+                    String originalWindow = driver.getWindowHandle();
+                    for (String handle : driver.getWindowHandles()) {
+                        if (!handle.equals(originalWindow)) {
+                            driver.switchTo().window(handle);
+                            String pdfUrl = driver.getCurrentUrl();
+                            if (pdfUrl.contains("/reports/frameset") || pdfUrl.contains(".pdf")) {
+                                log.info("✅ Facture PDF confirmée: {}", pdfUrl.substring(0, Math.min(100, pdfUrl.length())));
+                                pdfOpened = true;
+                            }
+                            driver.close();
+                            driver.switchTo().window(originalWindow);
+                            break;
                         }
                     }
+                }
 
-                    // Si pas d'erreur, vérifier les signes de succès
-                    if (isSuccessMessageDisplayed(driver)) {
-                        log.info("✅ Message de succès trouvé après timeout");
-                        return true;
+                // Vérifier les erreurs critiques (mais PAS payment mean)
+                try {
+                    WebElement errorAlert = driver.findElement(By.id("sas-alert"));
+                    if (errorAlert.isDisplayed()) {
+                        String errorText = errorAlert.getText();
+
+                        // Ignorer payment mean
+                        if (!errorText.toLowerCase().contains("payment mean") &&
+                                !errorText.toLowerCase().contains("moyen de paiement")) {
+
+                            if (errorText.contains("DTA-1009")) {
+                                log.error("❌ Erreur: Solde insuffisant");
+                                throw new RuntimeException("SOLDE_INSUFFISANT: " + errorText);
+                            } else if (errorText.contains("DTA-")) {
+                                log.error("❌ Erreur DTA: {}", errorText);
+                                throw new RuntimeException("ERREUR_DTA: " + errorText);
+                            }
+                        }
+                    }
+                } catch (NoSuchElementException e) {
+                    // Pas d'erreur
+                }
+
+                // DÉCISION APRÈS 15 SECONDES
+                if (i >= 15 && onInvoicePage && !successConfirmed) {
+                    log.info("⚠️ Sur /invoice depuis {}s sans message explicite", i - redirectionTime + 1);
+
+                    // Vérifier s'il y a des signes de succès
+                    boolean hasSuccessIndicators = false;
+
+                    // Indicateur 1: PDF ouvert
+                    if (pdfOpened) {
+                        hasSuccessIndicators = true;
+                        log.info("✅ Indicateur de succès: PDF facture ouvert");
                     }
 
-                    String currentUrl = driver.getCurrentUrl();
-                    if (!currentUrl.contains("search-subscriber") ||
-                            currentUrl.contains("reports") ||
-                            currentUrl.contains("facture") ||
-                            currentUrl.contains("invoice") ||
-                            currentUrl.contains("success") ||
-                            currentUrl.contains("confirmation")) {
-                        log.info("✅ URL suggère un succès: {}", currentUrl);
-                        return true;
+                    // Indicateur 2: Pas sur la page d'erreur
+                    if (!currentUrl.contains("error") && !currentUrl.contains("failed")) {
+                        hasSuccessIndicators = true;
+                        log.info("✅ Indicateur de succès: Pas de page d'erreur");
                     }
 
-                    // En cas de timeout sans erreur, considérer comme succès
-                    log.info("✅ Timeout sans erreur = succès présumé");
-                    return true;
+                    // Indicateur 3: Changement d'URL significatif
+                    if (!currentUrl.equals(urlBeforeValidation)) {
+                        hasSuccessIndicators = true;
+                        log.info("✅ Indicateur de succès: URL a changé");
+                    }
 
-                default:
-                    return false;
+                    // Si on a des indicateurs de succès après 15s sur /invoice
+                    if (hasSuccessIndicators) {
+                        log.info("🎯 SUCCÈS PROBABLE - Validation acceptée sans message explicite");
+                        successConfirmed = true;
+                        break;
+                    }
+                }
+
+                // Logs de progression
+                if ((i + 1) % 5 == 0) {
+                    log.info("⏳ Attente... ({}s/{}s) - URL: {}",
+                            i + 1, maxWaitSeconds,
+                            currentUrl.substring(currentUrl.lastIndexOf('/') + 1));
+                }
             }
+
+            // ÉVALUATION FINALE
+            if (successConfirmed) {
+                log.info("✅ VALIDATION CONFIRMÉE");
+                return true;
+            }
+
+            // Si on est sur /invoice après le timeout SANS erreur visible
+            String finalUrl = driver.getCurrentUrl();
+            if (finalUrl.contains("/invoice")) {
+                // Dernière vérification d'erreur
+                Boolean hasError = (Boolean) js.executeScript("""
+                return !!document.querySelector('#sas-alert:not([style*="none"])') ||
+                       document.body.innerText.toLowerCase().includes('error') ||
+                       document.body.innerText.toLowerCase().includes('échec');
+            """);
+
+                if (!Boolean.TRUE.equals(hasError)) {
+                    log.info("✅ SUCCÈS PRÉSUMÉ - Sur /invoice sans erreur après validation");
+                    return true;
+                } else {
+                    log.error("❌ Sur /invoice avec erreur détectée");
+                    throw new RuntimeException("Validation échouée - Erreur détectée sur la page");
+                }
+            }
+
+            // Échec si toujours sur la page initiale
+            if (finalUrl.equals(urlBeforeValidation)) {
+                log.error("❌ Aucun changement après validation");
+                throw new RuntimeException("Aucune action après validation - La page n'a pas changé");
+            }
+
+            log.error("❌ Validation non confirmée après {}s", maxWaitSeconds);
+            throw new RuntimeException("Aucune confirmation de validation après " + maxWaitSeconds + " secondes");
 
         } catch (RuntimeException re) {
             throw re;
         } catch (Exception e) {
-            log.error("Erreur lors de la validation : {}", e.getMessage());
+            log.error("Erreur lors de la validation: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    // Méthode helper pour vérifier la présence d'erreurs
+    private boolean isErrorPresent(WebDriver driver) {
+        try {
+            // Vérifier plusieurs indicateurs d'erreur
+            List<WebElement> errorElements = driver.findElements(By.xpath(
+                    "//div[@id='sas-alert' and contains(@style,'display: block')] | " +
+                            "//div[contains(@class,'error') and not(contains(@style,'display: none'))] | " +
+                            "//span[contains(@class,'error-message')] | " +
+                            "//div[contains(text(),'Erreur')] | " +
+                            "//div[contains(text(),'ERROR')]"
+            ));
+
+            for (WebElement errorElem : errorElements) {
+                if (errorElem.isDisplayed()) {
+                    String errorText = errorElem.getText();
+                    // Ignorer les erreurs "payment mean" temporaires
+                    if (!errorText.toLowerCase().contains("payment mean") &&
+                            !errorText.toLowerCase().contains("moyen de paiement")) {
+                        log.debug("Erreur détectée: {}", errorText);
+                        return true;
+                    }
+                }
+            }
+
+            // Vérifier aussi dans le texte de la page
+            String pageText = driver.findElement(By.tagName("body")).getText().toLowerCase();
+            if (pageText.contains("échec") ||
+                    pageText.contains("erreur") && !pageText.contains("aucune erreur") ||
+                    pageText.contains("failed") ||
+                    pageText.contains("impossible")) {
+
+                // Double vérification pour éviter les faux positifs
+                if (!pageText.contains("succès") &&
+                        !pageText.contains("effectué") &&
+                        !pageText.contains("confirmé")) {
+                    return true;
+                }
+            }
+
+        } catch (Exception e) {
+            log.debug("Erreur lors de la vérification d'erreurs: {}", e.getMessage());
+        }
+
+        return false;
+    }
+
+
+    // Ajouter aussi cette méthode helper pour un debug amélioré
+    private void capturePageState(WebDriver driver, String phase) {
+        try {
+            log.debug("📸 Capture état - Phase: {}", phase);
+            log.debug("  URL: {}", driver.getCurrentUrl());
+            log.debug("  Title: {}", driver.getTitle());
+
+            // Capturer les éléments importants
+            List<WebElement> buttons = driver.findElements(By.tagName("button"));
+            log.debug("  Nombre de boutons: {}", buttons.size());
+
+            // Vérifier la présence de mots-clés importants
+            String pageSource = driver.getPageSource().toLowerCase();
+            log.debug("  Contient 'success': {}", pageSource.contains("success"));
+            log.debug("  Contient 'error': {}", pageSource.contains("error"));
+            log.debug("  Contient 'invoice': {}", pageSource.contains("invoice"));
+            log.debug("  Contient 'confirmation': {}", pageSource.contains("confirmation"));
+
+        } catch (Exception e) {
+            log.debug("Erreur capture état: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Vérifie UNIQUEMENT les erreurs critiques (solde insuffisant, etc.)
+     * IGNORE "payment mean" qui peut être temporaire
+     */
+    private String checkForCriticalErrors(WebDriver driver) {
+        try {
+            List<WebElement> errorAlerts = driver.findElements(ERROR_ALERT);
+            if (!errorAlerts.isEmpty() && errorAlerts.get(0).isDisplayed()) {
+                WebElement errorDiv = errorAlerts.get(0);
+                WebElement errorMsg = errorDiv.findElement(ERROR_MESSAGE);
+                String errorText = errorMsg.getText();
+
+                // ⭐ IGNORER "payment mean" pendant la validation
+                if (errorText.toLowerCase().contains("payment mean") ||
+                        errorText.toLowerCase().contains("moyen de paiement")) {
+                    return null; // Pas une erreur critique
+                }
+
+                // Vérifier les VRAIES erreurs critiques
+                log.error("🚨 Erreur critique: {}", errorText);
+
+                String errorCode = extractErrorCode(errorText);
+                if ("DTA-1009".equals(errorCode)) {
+                    return "SOLDE_INSUFFISANT: " + errorText;
+                } else if (errorCode != null) {
+                    return "ERREUR_DTA_" + errorCode + ": " + errorText;
+                } else {
+                    return "ERREUR_SYSTEME: " + errorText;
+                }
+            }
+        } catch (Exception e) {
+            // Ignorer les erreurs de vérification
+        }
+        return null;
+    }
+
+    /**
+     * Vérifie les erreurs SAUF "payment mean" (qui peut apparaître temporairement)
+     */
+    private String checkForErrorsExcludingPaymentMean(WebDriver driver, WebDriverWait wait) {
+        try {
+            Thread.sleep(500);
+
+            List<WebElement> errorAlerts = driver.findElements(ERROR_ALERT);
+            if (!errorAlerts.isEmpty() && errorAlerts.get(0).isDisplayed()) {
+                WebElement errorDiv = errorAlerts.get(0);
+                WebElement errorMsg = errorDiv.findElement(ERROR_MESSAGE);
+                String errorText = errorMsg.getText();
+
+                // ⭐ IGNORER "payment mean" pendant la validation
+                if (errorText.toLowerCase().contains("payment mean") ||
+                        errorText.toLowerCase().contains("moyen de paiement")) {
+                    log.debug("⚠️ Message 'payment mean' ignoré (temporaire)");
+                    return null;
+                }
+
+                // Vérifier les autres erreurs critiques
+                log.error("🚨 Erreur critique détectée: {}", errorText);
+
+                String errorCode = extractErrorCode(errorText);
+                if ("DTA-1009".equals(errorCode)) {
+                    return "SOLDE_INSUFFISANT";
+                } else if (errorCode != null) {
+                    return "ERREUR_" + errorCode;
+                } else {
+                    return "ERREUR: " + errorText;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Pas d'erreur critique détectée: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private boolean verifyPaymentConfirmation(WebDriver driver, JavascriptExecutor js) {
+        try {
+            Thread.sleep(2000);
+
+            // Vérifier le message exact de succès
+            String confirmationScript = """
+            var confirmed = false;
+            
+            // Chercher le message exact
+            var bodyText = document.body.innerText;
+            if (bodyText.includes('renewal of the contract was successfully done') ||
+                bodyText.includes('réabonnement a été fait avec succès')) {
+                confirmed = true;
+            }
+            
+            // Vérifier qu'il n'y a PAS d'erreur
+            var errorElements = document.querySelectorAll('#sas-alert, .error-message, [class*="error"]');
+            for (var i = 0; i < errorElements.length; i++) {
+                if (errorElements[i].style.display !== 'none' && 
+                    errorElements[i].textContent.trim() !== '') {
+                    confirmed = false;
+                    break;
+                }
+            }
+            
+            return confirmed;
+            """;
+
+            Boolean confirmed = (Boolean) js.executeScript(confirmationScript);
+
+            if (Boolean.TRUE.equals(confirmed)) {
+                log.info("✅ Paiement confirmé par vérification supplémentaire");
+                return true;
+            } else {
+                log.warn("⚠️ Aucune confirmation explicite de paiement trouvée");
+                return false;
+            }
+
+        } catch (Exception e) {
+            log.error("Erreur vérification paiement: {}", e.getMessage());
             return false;
         }
     }
@@ -1714,55 +2030,34 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     private String checkForSuccessMessage(WebDriver driver, JavascriptExecutor js) {
         try {
             String result = (String) js.executeScript("""
-            // Méthode 1: Chercher le div avec la classe operation-achieved-div
+            // Méthode 1: Message explicite UNIQUEMENT
             var successDiv = document.querySelector('.operation-achieved-div');
             if (successDiv) {
                 var text = successDiv.textContent || successDiv.innerText || '';
                 text = text.replace(/\\s+/g, ' ').trim();
                 
-                if (text.includes('réabonnement a été fait avec succès') || 
-                    text.includes('Le réabonnement a été fait avec succès') ||
-                    text.includes('abonnement a été fait avec succès') ||
-                    text.includes('succès') || 
-                    text.includes('réussi')) {
-                    console.log('Success found in operation-achieved-div:', text);
+                // PLUS STRICT: Vérifier le message exact
+                if (text.includes('renewal of the contract was successfully done') || 
+                    text.includes('réabonnement a été fait avec succès') ||
+                    text.includes('Le réabonnement a été fait avec succès')) {
+                    console.log('SUCCESS CONFIRMED:', text);
                     return text;
                 }
             }
             
-            // Méthode 2: Chercher un message de succès plus large
-            var allDivs = document.querySelectorAll('div, span, p');
-            for (var i = 0; i < allDivs.length; i++) {
-                var text = (allDivs[i].textContent || '').toLowerCase();
-                if ((text.includes('succès') || text.includes('réussi') || text.includes('successful')) &&
-                    (text.includes('réabonnement') || text.includes('abonnement') || text.includes('renewal'))) {
-                    console.log('Success found by broad search:', text);
-                    return allDivs[i].textContent;
+            // Méthode 2: Recherche large du message de succès
+            var allElements = document.querySelectorAll('div, span, p');
+            for (var i = 0; i < allElements.length; i++) {
+                var text = (allElements[i].textContent || '').trim();
+                if (text.includes('renewal of the contract was successfully done') ||
+                    text.includes('réabonnement a été fait avec succès')) {
+                    console.log('SUCCESS FOUND:', text);
+                    return text;
                 }
             }
             
-            // Méthode 3: Vérifier si on est sur une page de confirmation/facture
-            var url = window.location.href;
-            if (url.includes('success') || url.includes('confirmation') || 
-                url.includes('invoice') || url.includes('facture')) {
-                return 'SUCCESS_BY_URL';
-            }
-            
-            // Méthode 4: Chercher des éléments spécifiques de succès
-            var successIndicators = [
-                document.querySelector('.success-message'),
-                document.querySelector('.alert-success'),
-                document.querySelector('[class*="success"]'),
-                document.querySelector('[class*="achieved"]')
-            ];
-            
-            for (var elem of successIndicators) {
-                if (elem && elem.textContent) {
-                    console.log('Success indicator found:', elem.className);
-                    return elem.textContent;
-                }
-            }
-            
+            // NE PLUS RETOURNER SUCCESS_BY_URL
+            // Seulement retourner null si pas de message explicite
             return null;
             """);
 
@@ -1874,7 +2169,13 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         return "N/A";
     }
 
+    // Version par défaut (sans paramètre) - pour compatibilité avec le code existant
     private String checkForErrors(WebDriver driver, WebDriverWait wait) {
+        return checkForErrors(driver, wait, false); // Par défaut, ne pas ignorer payment mean
+    }
+
+    // Version complète avec paramètre ignorePaymentMean
+    private String checkForErrors(WebDriver driver, WebDriverWait wait, boolean ignorePaymentMean) {
         try {
             Thread.sleep(1000);
 
@@ -1886,12 +2187,18 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
                 log.error("🚨 Erreur détectée: {}", errorText);
 
-                // NOUVELLE GESTION : Erreur "payment mean"
+                // GESTION ERREUR "PAYMENT MEAN"
                 if (errorText.toLowerCase().contains("please select payment mean") ||
                         errorText.toLowerCase().contains("payment mean") ||
                         errorText.toLowerCase().contains("moyen de paiement")) {
 
-                    log.error("❌ ERREUR PAYMENT MEAN - Option non sélectionnée correctement");
+                    // ⭐ Si on demande d'ignorer payment mean pendant la validation
+                    if (ignorePaymentMean) {
+                        log.warn("⚠️ Erreur 'payment mean' détectée mais IGNORÉE pendant la validation");
+                        return null; // Ignorer complètement
+                    }
+
+                    log.error("❌ ERREUR PAYMENT MEAN - Vérification si c'est un faux positif");
 
                     // Vérifier si c'est un faux positif (succès malgré l'erreur)
                     Thread.sleep(3000);
@@ -1907,7 +2214,8 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     }
 
                     // Si vraiment une erreur
-                    return "OPTION_NON_SELECTIONNEE";
+                    log.error("❌ ERREUR PAYMENT MEAN CONFIRMÉE");
+                    return "OPTION_NON_SELECTIONNEE: " + errorText;
                 }
 
                 // Gestion existante des autres erreurs
@@ -1926,6 +2234,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
         return null;
     }
+
 
     private String extractErrorCode(String errorText) {
         Pattern pattern = Pattern.compile("\\((DTA-\\d+)\\)");
@@ -2257,12 +2566,12 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
     @Override
     public void addTransaction(TransactionDto transactionDto) {
-         reabonnementRepository.addTransaction(transactionDto);
+        reabonnementRepository.addTransaction(transactionDto);
     }
 
     @Override
-    public List<TransactionDto> getAllTransactionByUserId() {
-        return reabonnementRepository.getAllTransactionByUserId();
+    public List<TransactionDto> getAllTransactions() {
+        return reabonnementRepository.getAllTransactions();
     }
 
     // Méthode helper pour formater les dates

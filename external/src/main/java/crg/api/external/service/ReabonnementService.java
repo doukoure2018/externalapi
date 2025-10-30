@@ -12,7 +12,7 @@ import java.util.Optional;
 
 public interface ReabonnementService {
 
-    String effectuerReabonnement(ReabonnementRequest request);
+    String effectuerReabonnement(ReabonnementRequest request) throws InterruptedException;
 
     Optional<Map<String, Object>> rechercherInfosAbonne(String numAbonne);
 
@@ -23,5 +23,6 @@ public interface ReabonnementService {
 
     void addTransaction(TransactionDto transactionDto);
 
-    List<TransactionDto> getAllTransactionByUserId();
+    List<TransactionDto> getAllTransactions();
+
 }

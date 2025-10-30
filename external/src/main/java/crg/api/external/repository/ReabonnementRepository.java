@@ -16,7 +16,7 @@ public interface ReabonnementRepository {
 
     void addTransaction(TransactionDto transactionDto);
 
-    List<TransactionDto> getAllTransactionByUserId();
+    List<TransactionDto> getAllTransactions();
 
     List<DisplayPackageDto> getPackagesById(String packageId);
 

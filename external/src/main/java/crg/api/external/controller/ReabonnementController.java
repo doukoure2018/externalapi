@@ -312,7 +312,7 @@ public class ReabonnementController {
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
                         .timeStamp(LocalDateTime.now().toString())
-                        .data(of("transactions",reabonnementService.getAllTransactionByUserId()
+                        .data(of("transactions",reabonnementService.getAllTransactions()
                         ))
                         .message("Toutes les transactions")
                         .status(OK)

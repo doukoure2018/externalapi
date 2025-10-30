@@ -41,6 +41,21 @@ public class SlackServiceImpl implements SlackService {
     }
 
     @Override
+    public void sendLoginSuccess(String username) {
+        String message = String.format(
+                "✅ *CONNEXION RÉUSSIE*\n" +
+                        "```\n" +
+                        "👤 Compte: %s\n" +
+                        "🕐 Heure: %s\n" +
+                        "```",
+                username,
+                LocalDateTime.now().format(dateFormatter)
+        );
+
+        sendSlackMessageAsync(message);
+    }
+
+    @Override
     public void sendDecoderFound(String decoderNumber, boolean found) {
         String emoji = found ? "✅" : "❌";
         String status = found ? "TROUVÉ" : "INTROUVABLE";
@@ -56,6 +71,29 @@ public class SlackServiceImpl implements SlackService {
                 status,
                 decoderNumber,
                 found ? "Abonné actif" : "Abonné introuvable",
+                LocalDateTime.now().format(dateFormatter)
+        );
+
+        sendSlackMessageAsync(message);
+    }
+
+    @Override
+    public void sendReabonnementStart(ReabonnementRequest request) {
+        String message = String.format(
+                "🚀 *DÉBUT RÉABONNEMENT*\n" +
+                        "```\n" +
+                        "📱 Téléphone: %s\n" +
+                        "🆔 User ID: %s\n" +
+                        "📦 Offre: %s\n" +
+                        "⏱️ Durée: %s\n" +
+                        "🎯 Option: %s\n" +
+                        "🕐 Heure: %s\n" +
+                        "```",
+                request.getPhoneNumber(),
+                request.getNumAbonne(),               // Paramètre manquant ajouté
+                request.getOffre(),
+                request.getDuree(),
+                request.getOption() != null ? request.getOption() : "SANS_OPTION",
                 LocalDateTime.now().format(dateFormatter)
         );
 

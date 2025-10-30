@@ -24,4 +24,6 @@ public interface AccessRepository {
     AccessDto findActiveAccess();
 
     List<AccessDto> findExpiredAccess();
+
+    List<AccessDto> findAllActiveAccess();
 }

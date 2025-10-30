@@ -161,6 +161,18 @@ public class AccessRepositoryImpl implements AccessRepository {
         }
     }
 
+    @Override
+    public List<AccessDto> findAllActiveAccess() {
+        try {
+            return jdbcClient.sql(FIND_ALL_ACTIVE_ACCESS_QUERY)
+                    .query(AccessDto.class)
+                    .list();
+        } catch (Exception exception) {
+            log.error("Erreur lors de la récupération des accès actifs: {}", exception.getMessage());
+            throw new RuntimeException("Erreur lors de la récupération des accès actifs", exception);
+        }
+    }
+
     private AccessDto mapRowToAccess(ResultSet rs, int rowNum) throws SQLException {
         AccessDto access = new AccessDto();
         access.setId(rs.getLong("id"));
