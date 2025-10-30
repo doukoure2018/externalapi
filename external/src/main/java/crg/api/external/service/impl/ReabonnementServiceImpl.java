@@ -1491,13 +1491,16 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
 
     // SOLUTION DÉFINITIVE - Version corrigée qui cherche le message au bon endroit
+// SOLUTION DÉFINITIVE - Le PDF de facture comme preuve de succès
+
     private boolean performValidationWithConfirmation(WebDriver driver, JavascriptExecutor js, WebDriverWait wait) {
         try {
-            log.info("📋 Début de la validation avec attente de confirmation adaptative...");
+            log.info("📋 Début de la validation avec détection PDF...");
 
-            // Capturer l'URL avant validation
+            // Capturer l'état initial
             String urlBeforeValidation = driver.getCurrentUrl();
-            log.info("📍 URL avant validation: {}", urlBeforeValidation);
+            int windowsBeforeValidation = driver.getWindowHandles().size();
+            log.info("📍 État initial - URL: {}, Fenêtres: {}", urlBeforeValidation, windowsBeforeValidation);
 
             // Capturer l'état du formulaire (optionnel)
             try {
@@ -1541,39 +1544,76 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 log.info("✅ Bouton de validation cliqué (JavaScript)");
             }
 
-            // ATTENTE ADAPTATIVE - Gérer les deux workflows
-            log.info("⏳ Attente du résultat de validation...");
+            // ATTENTE AVEC DÉTECTION PDF PRIORITAIRE
+            log.info("⏳ Attente de confirmation (PDF ou message)...");
 
-            int maxWaitSeconds = 30;
+            int maxWaitSeconds = 20; // Réduit à 20s car le PDF arrive rapidement
             boolean successConfirmed = false;
-            boolean onSubscribersPage = false;
-            boolean onInvoicePage = false;
-            boolean pdfOpened = false;
+            boolean pdfConfirmed = false;
+            boolean messageFound = false;
             String successMessage = null;
-            int redirectionTime = -1;
 
             for (int i = 0; i < maxWaitSeconds; i++) {
                 Thread.sleep(1000);
 
                 String currentUrl = driver.getCurrentUrl();
 
-                // WORKFLOW 1: Détection de /subscribers avec message
-                if (!onSubscribersPage && currentUrl.contains("/subscribers")) {
-                    onSubscribersPage = true;
-                    log.info("📍 Redirection vers /subscribers détectée après {}s", i + 1);
+                // PRIORITÉ 1 : DÉTECTION DU PDF DE FACTURE
+                if (!pdfConfirmed && driver.getWindowHandles().size() > windowsBeforeValidation) {
+                    log.info("📄 Nouvel onglet détecté après {}s", i + 1);
 
-                    // Chercher le message de succès sur /subscribers
+                    // Vérifier que c'est bien le PDF de facture
+                    String originalWindow = driver.getWindowHandle();
+                    for (String handle : driver.getWindowHandles()) {
+                        if (!handle.equals(originalWindow)) {
+                            driver.switchTo().window(handle);
+                            String pdfUrl = driver.getCurrentUrl();
+
+                            if (pdfUrl.contains("/reports/frameset") ||
+                                    pdfUrl.contains("cptr0030") ||
+                                    pdfUrl.contains(".pdf")) {
+
+                                log.info("✅ FACTURE PDF CONFIRMÉE: {}",
+                                        pdfUrl.length() > 100 ? pdfUrl.substring(0, 100) + "..." : pdfUrl);
+                                pdfConfirmed = true;
+                                successConfirmed = true;
+
+                                // Fermer l'onglet PDF
+                                driver.close();
+                                driver.switchTo().window(originalWindow);
+
+                                // SUCCÈS CONFIRMÉ PAR PDF - On peut sortir
+                                log.info("🎉 SUCCÈS CONFIRMÉ PAR OUVERTURE DE LA FACTURE PDF");
+                                break;
+                            }
+
+                            driver.switchTo().window(originalWindow);
+                        }
+                    }
+
+                    if (pdfConfirmed) {
+                        // Attendre un peu pour stabilité puis sortir
+                        Thread.sleep(1000);
+                        break; // Sortir de la boucle principale
+                    }
+                }
+
+                // PRIORITÉ 2 : Message de succès (si présent)
+                if (!messageFound && !successConfirmed) {
                     try {
                         WebElement successDiv = driver.findElement(By.className("operation-achieved-div"));
                         if (successDiv.isDisplayed()) {
                             successMessage = successDiv.getText();
                             if (successMessage.contains("Le réabonnement a été fait avec succès")) {
-                                log.info("🎉 MESSAGE DE SUCCÈS trouvé sur /subscribers après {}s", i + 1);
+                                log.info("🎉 Message de succès trouvé après {}s", i + 1);
+                                messageFound = true;
                                 successConfirmed = true;
 
                                 // Cliquer sur Continuer si présent
                                 try {
-                                    WebElement continueBtn = driver.findElement(By.cssSelector("button[data-cy='continue-validation']"));
+                                    WebElement continueBtn = driver.findElement(
+                                            By.cssSelector("button[data-cy='continue-validation']")
+                                    );
                                     if (continueBtn.isDisplayed()) {
                                         continueBtn.click();
                                         log.info("✅ Bouton 'Continuer' cliqué");
@@ -1582,7 +1622,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                                     // Ignorer
                                 }
 
-                                break; // Succès confirmé
+                                break;
                             }
                         }
                     } catch (Exception e) {
@@ -1590,73 +1630,13 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     }
                 }
 
-                // WORKFLOW 2: Détection directe de /invoice SANS message
-                if (!onInvoicePage && currentUrl.contains("/invoice")) {
-                    onInvoicePage = true;
-                    redirectionTime = i + 1;
-                    log.info("📍 Redirection vers /invoice détectée après {}s", redirectionTime);
-
-                    // Attendre un peu pour voir si un message apparaît
-                    if (i < 10) {
-                        continue; // Continuer à attendre un peu
-                    }
-                }
-
-                // Recherche générale du message de succès (sur n'importe quelle page)
-                if (!successConfirmed) {
-                    Boolean hasSuccess = (Boolean) js.executeScript("""
-                    var successFound = false;
-                    
-                    // Par classe
-                    var divByClass = document.querySelector('.operation-achieved-div');
-                    if (divByClass && divByClass.innerText.includes('Le réabonnement a été fait avec succès')) {
-                        successFound = true;
-                    }
-                    
-                    // Dans le body
-                    if (document.body.innerText.includes('Le réabonnement a été fait avec succès')) {
-                        successFound = true;
-                    }
-                    
-                    return successFound;
-                """);
-
-                    if (Boolean.TRUE.equals(hasSuccess)) {
-                        log.info("🎉 Message de succès détecté après {}s", i + 1);
-                        successConfirmed = true;
-                        break;
-                    }
-                }
-
-                // Vérifier l'ouverture d'un PDF (signe de succès)
-                if (!pdfOpened && driver.getWindowHandles().size() > 1) {
-                    pdfOpened = true;
-                    log.info("📄 Nouvel onglet détecté (probablement PDF) après {}s", i + 1);
-
-                    // Vérifier si c'est bien un PDF
-                    String originalWindow = driver.getWindowHandle();
-                    for (String handle : driver.getWindowHandles()) {
-                        if (!handle.equals(originalWindow)) {
-                            driver.switchTo().window(handle);
-                            String pdfUrl = driver.getCurrentUrl();
-                            if (pdfUrl.contains("/reports/frameset") || pdfUrl.contains(".pdf")) {
-                                log.info("✅ Facture PDF confirmée: {}", pdfUrl.substring(0, Math.min(100, pdfUrl.length())));
-                                pdfOpened = true;
-                            }
-                            driver.close();
-                            driver.switchTo().window(originalWindow);
-                            break;
-                        }
-                    }
-                }
-
-                // Vérifier les erreurs critiques (mais PAS payment mean)
+                // Vérifier les erreurs critiques
                 try {
                     WebElement errorAlert = driver.findElement(By.id("sas-alert"));
                     if (errorAlert.isDisplayed()) {
                         String errorText = errorAlert.getText();
 
-                        // Ignorer payment mean
+                        // Ignorer payment mean temporaire
                         if (!errorText.toLowerCase().contains("payment mean") &&
                                 !errorText.toLowerCase().contains("moyen de paiement")) {
 
@@ -1673,57 +1653,39 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     // Pas d'erreur
                 }
 
-                // DÉCISION APRÈS 15 SECONDES
-                if (i >= 15 && onInvoicePage && !successConfirmed) {
-                    log.info("⚠️ Sur /invoice depuis {}s sans message explicite", i - redirectionTime + 1);
-
-                    // Vérifier s'il y a des signes de succès
-                    boolean hasSuccessIndicators = false;
-
-                    // Indicateur 1: PDF ouvert
-                    if (pdfOpened) {
-                        hasSuccessIndicators = true;
-                        log.info("✅ Indicateur de succès: PDF facture ouvert");
-                    }
-
-                    // Indicateur 2: Pas sur la page d'erreur
-                    if (!currentUrl.contains("error") && !currentUrl.contains("failed")) {
-                        hasSuccessIndicators = true;
-                        log.info("✅ Indicateur de succès: Pas de page d'erreur");
-                    }
-
-                    // Indicateur 3: Changement d'URL significatif
-                    if (!currentUrl.equals(urlBeforeValidation)) {
-                        hasSuccessIndicators = true;
-                        log.info("✅ Indicateur de succès: URL a changé");
-                    }
-
-                    // Si on a des indicateurs de succès après 15s sur /invoice
-                    if (hasSuccessIndicators) {
-                        log.info("🎯 SUCCÈS PROBABLE - Validation acceptée sans message explicite");
-                        successConfirmed = true;
-                        break;
-                    }
+                // Log de progression
+                if ((i + 1) % 5 == 0) {
+                    log.info("⏳ Attente... ({}s/{}s) - URL: {}, PDF: {}",
+                            i + 1, maxWaitSeconds,
+                            currentUrl.substring(currentUrl.lastIndexOf('/') + 1),
+                            pdfConfirmed ? "✅" : "❌");
                 }
 
-                // Logs de progression
-                if ((i + 1) % 5 == 0) {
-                    log.info("⏳ Attente... ({}s/{}s) - URL: {}",
-                            i + 1, maxWaitSeconds,
-                            currentUrl.substring(currentUrl.lastIndexOf('/') + 1));
+                // Arrêt anticipé si PDF confirmé
+                if (pdfConfirmed) {
+                    log.info("✅ Validation confirmée par PDF après {}s", i + 1);
+                    break;
                 }
             }
 
             // ÉVALUATION FINALE
             if (successConfirmed) {
-                log.info("✅ VALIDATION CONFIRMÉE");
+                if (pdfConfirmed) {
+                    log.info("✅ PAIEMENT CONFIRMÉ PAR FACTURE PDF");
+                } else if (messageFound) {
+                    log.info("✅ PAIEMENT CONFIRMÉ PAR MESSAGE");
+                }
                 return true;
             }
 
-            // Si on est sur /invoice après le timeout SANS erreur visible
+            // Dernière vérification avant échec
             String finalUrl = driver.getCurrentUrl();
-            if (finalUrl.contains("/invoice")) {
-                // Dernière vérification d'erreur
+
+            // Si on est sur /subscribers ou /invoice sans erreur visible
+            if ((finalUrl.contains("/subscribers") || finalUrl.contains("/invoice")) &&
+                    !finalUrl.equals(urlBeforeValidation)) {
+
+                // Vérifier qu'il n'y a pas d'erreur
                 Boolean hasError = (Boolean) js.executeScript("""
                 return !!document.querySelector('#sas-alert:not([style*="none"])') ||
                        document.body.innerText.toLowerCase().includes('error') ||
@@ -1731,22 +1693,13 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             """);
 
                 if (!Boolean.TRUE.equals(hasError)) {
-                    log.info("✅ SUCCÈS PRÉSUMÉ - Sur /invoice sans erreur après validation");
+                    log.info("✅ SUCCÈS PRÉSUMÉ - Changement d'URL sans erreur");
                     return true;
-                } else {
-                    log.error("❌ Sur /invoice avec erreur détectée");
-                    throw new RuntimeException("Validation échouée - Erreur détectée sur la page");
                 }
             }
 
-            // Échec si toujours sur la page initiale
-            if (finalUrl.equals(urlBeforeValidation)) {
-                log.error("❌ Aucun changement après validation");
-                throw new RuntimeException("Aucune action après validation - La page n'a pas changé");
-            }
-
-            log.error("❌ Validation non confirmée après {}s", maxWaitSeconds);
-            throw new RuntimeException("Aucune confirmation de validation après " + maxWaitSeconds + " secondes");
+            log.error("❌ Échec validation - Aucune confirmation (PDF ou message) après {}s", maxWaitSeconds);
+            throw new RuntimeException("Aucune confirmation de paiement détectée");
 
         } catch (RuntimeException re) {
             throw re;
