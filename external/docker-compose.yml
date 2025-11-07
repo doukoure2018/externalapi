@@ -46,7 +46,7 @@ services:
 
   external-api:
     container_name: external-api
-    image: doukoure93/external-api
+    image: doukoure93/external-api:latest
     environment:
       POSTGRES_HOST: postgres-external
       POSTGRES_PORT: 5432
@@ -90,6 +90,7 @@ services:
 
       # Profile
       ACTIVE_PROFILE: dev
+      PAYMENT_TEST_MODE: "${PAYMENT_TEST_MODE}"
 
       # JVM Options
       JAVA_OPTS: "-Xmx512m -Xms256m -XX:+UseG1GC"

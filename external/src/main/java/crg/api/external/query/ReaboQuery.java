@@ -4,7 +4,7 @@ public class ReaboQuery {
 
     public static final String SELECT_ALL_PACKAGES_QUERY =
             """
-                SELECT id, display_name, description
+                SELECT id, display_name
                         FROM packages
                         WHERE is_active = true
                         ORDER BY

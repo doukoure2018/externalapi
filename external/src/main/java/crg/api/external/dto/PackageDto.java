@@ -11,10 +11,10 @@ import java.time.LocalDateTime;
 @ToString
 public class PackageDto {
     private String id;
-    private String name;
+    //private String name;
     private String displayName;
-    private String description;
-    private Boolean isActive;
-    private LocalDateTime createdAt;
+    //private String description;
+    //private Boolean isActive;
+    //private LocalDateTime createdAt;
 }
 
