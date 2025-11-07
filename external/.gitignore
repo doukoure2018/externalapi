@@ -48,7 +48,3 @@ secrets/
 !.env.example
 # Environment files - DO NOT COMMIT
 .env
-.env.dev
-.env.prod
-.env.local
-.env.*.local

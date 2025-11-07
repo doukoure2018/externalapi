@@ -25,4 +25,5 @@ public interface ReabonnementService {
 
     List<TransactionDto> getAllTransactions();
 
+    Map<String, Object> getAccountsStatus();
 }

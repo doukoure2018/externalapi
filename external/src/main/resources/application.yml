@@ -15,7 +15,7 @@ server:
     whitelabel:
       enabled: false
   address: 0.0.0.0
-  port: ${CONTAINER_PORT:8090}
+  port: ${SERVER_PORT:8090}
 
 spring:
   servlet:
@@ -176,3 +176,8 @@ springdoc:
         - /**
       display-name: All APIs
 
+
+
+payment:
+  test:
+    mode: true

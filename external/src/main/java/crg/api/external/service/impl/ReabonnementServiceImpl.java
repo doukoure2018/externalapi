@@ -20,8 +20,6 @@ import org.openqa.selenium.JavascriptExecutor;
 import io.github.bonigarcia.wdm.WebDriverManager;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.openqa.selenium.*;
 import org.openqa.selenium.NoSuchElementException;
 import org.openqa.selenium.TimeoutException;
@@ -33,9 +31,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
 import java.net.URL;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -75,6 +71,9 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     @Value("${slack.credential}")
     private String slackCredential;
 
+    @Value("${payment.test.mode:false}")
+    private boolean paymentTestMode;
+
     // Pool de drivers pour réutilisation - Augmenté pour VPS Elite
     private final BlockingQueue<WebDriver> driverPool = new LinkedBlockingQueue<>(10);
     private final ScheduledExecutorService poolMaintainer = Executors.newScheduledThreadPool(1);
@@ -94,6 +93,9 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
     private static final By ERROR_ALERT = By.id("sas-alert");
     private static final By ERROR_MESSAGE = By.cssSelector(".error-message");
+
+    private final Map<String, LocalDateTime> accountsInUse = new ConcurrentHashMap<>();
+
 
     // Mapping des offres - CORRECTION selon la base de données
     private static final Map<String, String> OFFRE_MAP = Map.of(
@@ -247,8 +249,21 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     }
 
     @Override
-    public String effectuerReabonnement(ReabonnementRequest req) {
+    public String effectuerReabonnement(ReabonnementRequest req)
+    {
         long startTime = System.currentTimeMillis();
+
+        // ⭐ Indiquer le mode de fonctionnement
+        if (paymentTestMode) {
+            log.warn("🧪 ============================================");
+            log.warn("🧪 MODE TEST ACTIVÉ - PAIEMENTS SIMULÉS");
+            log.warn("🧪 ============================================");
+        }
+
+        log.info("🚀 DÉBUT RÉABONNEMENT pour abonné {} [Mode: {}]",
+                req.getNumAbonne(),
+                paymentTestMode ? "TEST" : "PRODUCTION");
+
         log.info("🚀 DÉBUT RÉABONNEMENT pour abonné {}", req.getNumAbonne());
 
         // Variables déclarées au niveau méthode
@@ -256,6 +271,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         JavascriptExecutor js = null;
         WebDriverWait wait = null;
         TransactionDto transaction = null;
+        AccessDto currentAccount = null; // Pour tracker le compte utilisé
 
         // Variables de résultat
         boolean needReturn = false;
@@ -283,9 +299,16 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             js = (JavascriptExecutor) driver;
             wait = new WebDriverWait(driver, Duration.ofSeconds(10));
 
-            // ========== PHASE 2: LOGIN ==========
+            // ========== PHASE 2: LOGIN AVEC GESTION DES COMPTES ==========
             slackService.sendReabonnementProgress("LOGIN", "Connexion au système Canal+...");
-            performFastLogin(driver, js);
+
+            // Nouvelle gestion du login avec blocage du compte
+            currentAccount = performFastLoginWithAccountBlocking(driver, js);
+            if (currentAccount == null) {
+                slackService.sendReabonnementError(req, "NO_ACCOUNT_AVAILABLE",
+                        "Aucun compte Canal+ disponible");
+                return "Erreur : Aucun compte Canal+ disponible actuellement. Veuillez réessayer dans quelques instants.";
+            }
 
             // ========== PHASE 3: RECHERCHE ABONNÉ ==========
             slackService.sendSearchingDecoder(req.getNumAbonne());
@@ -315,24 +338,34 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             log.info("📱 Extraction du numéro de téléphone de l'abonné...");
             subscriberPhone = extractSubscriberPhone(driver, js);
 
+            // MODIFICATION: Gestion améliorée du numéro manquant
             if (subscriberPhone == null || subscriberPhone.isEmpty()) {
                 log.error("❌ Numéro de téléphone non trouvé pour le décodeur {}", req.getNumAbonne());
 
-                slackService.sendReabonnementError(req, "PHONE_NOT_FOUND",
-                        "Numéro de téléphone de l'abonné non trouvé");
+                // Si on a un numéro fourni dans la requête, on l'utilise
+                if (req.getPhoneNumber() != null && !req.getPhoneNumber().isEmpty()) {
+                    subscriberPhone = cleanSubscriberPhone(req.getPhoneNumber());
+                    log.info("✅ Utilisation du numéro fourni dans la requête: {}", subscriberPhone);
 
-                transaction = createTransaction(req, "N/A", null, null,
-                        "failed", null, System.currentTimeMillis() - startTime);
-                transaction.setErrorMessage("PHONE_NOT_FOUND");
-                saveTransaction(transaction);
+                    // Envoyer un SMS pour informer de la mise à jour nécessaire
+                    sendPhoneUpdateNotification(req);
 
-                throw new SubscriberPhoneNotFoundException(
-                        "Numéro de téléphone non trouvé pour le décodeur: " + req.getNumAbonne());
+                } else {
+                    // Pas de numéro trouvé ni fourni - envoyer alerte et continuer sans SMS
+                    sendPhoneNotFoundAlert(req);
+                    log.warn("⚠️ Réabonnement continuera sans envoi de SMS à l'abonné");
+
+                    slackService.sendReabonnementProgress("PHONE_NOT_FOUND",
+                            "Numéro non trouvé - Continuation sans SMS");
+
+                    // On continue le processus sans lever d'exception
+                    subscriberPhone = null;
+                }
+            } else {
+                log.info("✅ Numéro de téléphone trouvé: {}", subscriberPhone);
+                slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
+                        "Numéro abonné: " + subscriberPhone);
             }
-
-            log.info("✅ Numéro de téléphone trouvé: {}", subscriberPhone);
-            slackService.sendReabonnementProgress("EXTRACTION_TELEPHONE",
-                    "Numéro abonné: " + subscriberPhone);
 
             // Extraction montant/dates
             log.info("💰 Extraction des données de facture...");
@@ -345,12 +378,10 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 slackService.sendReabonnementProgress("MONTANT", "Montant: " + montantFinal);
             }
 
-           // PHASE 6: VALIDATION (APRÈS extraction!)
+            // PHASE 6: VALIDATION (APRÈS extraction!)
             slackService.sendReabonnementProgress("VALIDATION", "Validation en cours...");
 
             boolean validationSuccess = performValidationWithConfirmation(driver, js, wait);
-
-
 
             // Vérification immédiate des erreurs (payment mean géré automatiquement dans checkForErrors)
             String immediateErrorCheck = checkForErrors(driver, wait);
@@ -385,14 +416,37 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             // ========== PHASE 7: SUCCÈS - ENREGISTREMENT ==========
 
             processingDuration = System.currentTimeMillis() - startTime;
-            log.info("🎉 Réabonnement CONFIRMÉ avec succès en {}ms", processingDuration);
+//            log.info("🎉 Réabonnement CONFIRMÉ avec succès en {}ms", processingDuration);
 
-            slackService.sendValidationStatus("SUCCESS",
-                    String.format("Confirmé en %dms", processingDuration));
+//            slackService.sendValidationStatus("SUCCESS",
+//                    String.format("Confirmé en %dms", processingDuration));
+//
+//            transaction = createTransaction(req, montantFinal,
+//                    subscriptionStartDate, subscriptionEndDate,
+//                    "completed", null, processingDuration);
 
-            transaction = createTransaction(req, montantFinal,
-                    subscriptionStartDate, subscriptionEndDate,
-                    "completed", null, processingDuration);
+            if (paymentTestMode) {
+                log.info("🧪 [TEST] Réabonnement SIMULÉ avec succès en {}ms", processingDuration);
+
+                slackService.sendValidationStatus("TEST_SUCCESS",
+                        String.format("SIMULATION confirmée en %dms", processingDuration));
+
+                // Créer une transaction de test
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "test_completed", null, processingDuration);
+                transaction.setErrorMessage("TEST_MODE");
+
+            } else {
+                log.info("🎉 Réabonnement CONFIRMÉ avec succès en {}ms", processingDuration);
+
+                slackService.sendValidationStatus("SUCCESS",
+                        String.format("Confirmé en %dms", processingDuration));
+
+                transaction = createTransaction(req, montantFinal,
+                        subscriptionStartDate, subscriptionEndDate,
+                        "completed", null, processingDuration);
+            }
 
             saveTransaction(transaction);
 
@@ -401,11 +455,20 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
             // SMS si numéro disponible
             if (subscriberPhone != null && !subscriberPhone.isEmpty()) {
-                sendSmsSuccessToSubscriber(subscriberPhone, req, montantFinal, transaction);
+//                sendSmsSuccessToSubscriber(subscriberPhone, req, montantFinal, transaction);
+                if (paymentTestMode) {
+                    log.info("🧪 [TEST] SMS de succès NON envoyé (mode test)");
+                } else {
+                    sendSmsSuccessToSubscriber(subscriberPhone, req, montantFinal, transaction);
+                }
             }
 
             needReturn = true;
-            return "Réabonnement effectué avec succès !";
+            if (paymentTestMode) {
+                return "🧪 [TEST] Réabonnement SIMULÉ avec succès ! (Aucun paiement réel effectué)";
+            } else {
+                return "Réabonnement effectué avec succès !";
+            }
 
         } catch (SubscriberPhoneNotFoundException e) {
             log.error("❌ Numéro de téléphone non trouvé: {}", e.getMessage());
@@ -419,9 +482,8 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
             String errorMsg = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
 
-            // ========== GESTION DES CAS D'ERREUR SPÉCIFIQUES ==========
-
-            // CAS 1: ERREUR OPTION/PAYMENT MEAN (déjà géré par checkForErrors, mais au cas où)
+            // [RESTE DE LA GESTION DES ERREURS INCHANGÉE]
+            // CAS 1: ERREUR OPTION/PAYMENT MEAN
             if (errorMsg.contains("OPTION_NON_SELECTIONNEE") ||
                     errorMsg.contains("PAYMENT_MEAN_ERROR")) {
 
@@ -439,7 +501,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 needReturn = false;
                 return "ERREUR: Configuration incorrecte. Veuillez réessayer.";
             }
-
             // CAS 2: Solde insuffisant
             if (errorMsg.contains("SOLDE_INSUFFISANT") || errorMsg.contains("DTA-1009")) {
                 log.warn("⚠️ Solde insuffisant pour l'abonné {}", req.getNumAbonne());
@@ -557,6 +618,12 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     "Si le problème persiste, contactez le support au 622459305.";
 
         } finally {
+            // LIBÉRATION DU COMPTE
+            if (currentAccount != null) {
+                releaseAccount(currentAccount.getUsername());
+                log.info("🔓 Compte {} libéré", currentAccount.getUsername());
+            }
+
             // Nettoyage des ressources
             if (driver != null) {
                 try {
@@ -581,6 +648,265 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             log.info("⏱️ Durée totale: {}ms", System.currentTimeMillis() - startTime);
         }
     }
+
+
+    private AccessDto performFastLoginWithAccountBlocking(WebDriver driver, JavascriptExecutor js) {
+        int maxAttempts = 5;
+        Set<String> failedAccounts = new HashSet<>();
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                // Récupérer un compte disponible et non bloqué
+                AccessDto accessDto = getNextAvailableAccountWithLocking(failedAccounts);
+
+                if (accessDto == null) {
+                    log.error("❌ Plus aucun compte Canal+ disponible après {} tentatives", attempt - 1);
+                    return null;
+                }
+
+                log.info("🔐 Tentative #{} - Login avec le compte: {}", attempt, accessDto.getUsername());
+
+                // Tenter la connexion
+                driver.get("https://cgaweb-afrique.canal-plus.com/mypos/");
+
+                WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+                WebElement loginInput = wait.until(ExpectedConditions.presenceOfElementLocated(LOGIN_INPUT));
+                WebElement passwordInput = wait.until(ExpectedConditions.presenceOfElementLocated(PASSWORD_INPUT));
+
+                loginInput.clear();
+                loginInput.sendKeys(accessDto.getUsername());
+                passwordInput.clear();
+                passwordInput.sendKeys(accessDto.getPassword());
+                passwordInput.sendKeys(Keys.RETURN);
+
+                try {
+                    wait.withTimeout(Duration.ofSeconds(15)).until(ExpectedConditions.or(
+                            ExpectedConditions.urlContains("dashboard"),
+                            ExpectedConditions.urlContains("search-subscriber"),
+                            ExpectedConditions.presenceOfElementLocated(SUBSCRIBER_INPUT)
+                    ));
+
+                    String currentUrl = driver.getCurrentUrl();
+                    if (currentUrl.contains("dashboard") ||
+                            currentUrl.contains("search-subscriber") ||
+                            driver.findElements(SUBSCRIBER_INPUT).size() > 0) {
+
+                        log.info("✅ Login successful avec {}", accessDto.getUsername());
+                        updateAccountLastUsed(accessDto);
+                        return accessDto; // Succès, retourner le compte utilisé
+                    }
+
+                } catch (TimeoutException e) {
+                    log.warn("⚠️ Échec de connexion pour le compte {} - Probable 2FA activé",
+                            accessDto.getUsername());
+
+                    // Libérer le compte
+                    releaseAccount(accessDto.getUsername());
+
+                    // Ajouter à la liste des échecs
+                    failedAccounts.add(accessDto.getUsername());
+
+                    // Envoyer SMS d'alerte 2FA amélioré
+                    send2FAAlertSMSEnhanced(accessDto.getUsername());
+
+                    if (attempt < maxAttempts) {
+                        log.info("🔄 Passage au compte suivant...");
+                        Thread.sleep(2000);
+                    }
+                }
+
+            } catch (Exception e) {
+                log.error("Erreur lors de la tentative de connexion #{}: {}", attempt, e.getMessage());
+            }
+        }
+
+        return null;
+    }
+
+    private AccessDto getNextAvailableAccountWithLocking(Set<String> failedAccounts) {
+        try {
+            List<AccessDto> activeAccounts = reabonnementRepository.findAllActiveAccess();
+
+            // Filtrer les comptes disponibles
+            List<AccessDto> availableAccounts = activeAccounts.stream()
+                    .filter(account -> !failedAccounts.contains(account.getUsername()))
+                    .filter(account -> !isAccountInUse(account.getUsername()))
+                    .filter(account -> !isAccountTemporarilyBlocked(account.getUsername()))
+                    .sorted((a, b) -> {
+                        if (a.getLastUsedAt() == null) return -1;
+                        if (b.getLastUsedAt() == null) return 1;
+                        return a.getLastUsedAt().compareTo(b.getLastUsedAt());
+                    })
+                    .collect(Collectors.toList());
+
+            if (availableAccounts.isEmpty()) {
+                return null;
+            }
+
+            // Prendre le premier compte disponible et le verrouiller
+            AccessDto selectedAccount = availableAccounts.get(0);
+            lockAccount(selectedAccount.getUsername());
+
+            return selectedAccount;
+
+        } catch (Exception e) {
+            log.error("Erreur lors de la récupération des comptes: {}", e.getMessage());
+            return null;
+        }
+    }
+
+
+    private boolean isAccountInUse(String username) {
+        LocalDateTime lockedUntil = accountsInUse.get(username);
+        if (lockedUntil != null) {
+            if (LocalDateTime.now().isBefore(lockedUntil)) {
+                return true;
+            } else {
+                // Le verrou a expiré (sécurité après 10 minutes)
+                accountsInUse.remove(username);
+            }
+        }
+        return false;
+    }
+
+
+    // Verrouiller un compte
+    private void lockAccount(String username) {
+        // Verrouillage pour 10 minutes maximum (sécurité)
+        accountsInUse.put(username, LocalDateTime.now().plusMinutes(10));
+        log.info("🔒 Compte {} verrouillé pour utilisation", username);
+    }
+
+    // Libérer un compte
+    private void releaseAccount(String username) {
+        accountsInUse.remove(username);
+        log.info("🔓 Compte {} libéré", username);
+    }
+
+    // SMS pour numéro de téléphone non trouvé
+    private void sendPhoneNotFoundAlert(ReabonnementRequest req) {
+        smsExecutor.execute(() -> {
+            try {
+                TokenResponse token = orangeSmsService.getOAuthToken();
+                if (!isTokenValid(token)) {
+                    log.error("❌ Token invalide pour envoi SMS alerte");
+                    return;
+                }
+
+                String message = String.format(
+                        "⚠️ ALERTE CANAL+\n\n" +
+                                "Numéro de téléphone non trouvé lors du réabonnement:\n\n" +
+                                "Décodeur: %s\n" +
+                                "Numéro fourni: %s\n\n" +
+                                "Action requise: Mettre à jour le numéro dans CGA Canal+\n\n" +
+                                "Heure: %s",
+                        req.getNumAbonne(),
+                        req.getPhoneNumber() != null ? req.getPhoneNumber() : "AUCUN",
+                        LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
+                );
+
+                sendSmsToAdmins(token.getToken(), message);
+
+            } catch (Exception e) {
+                log.error("Erreur envoi SMS alerte numéro non trouvé: {}", e.getMessage());
+            }
+        });
+    }
+
+
+
+    // SMS pour mise à jour du numéro nécessaire
+    private void sendPhoneUpdateNotification(ReabonnementRequest req) {
+        smsExecutor.execute(() -> {
+            try {
+                TokenResponse token = orangeSmsService.getOAuthToken();
+                if (!isTokenValid(token)) {
+                    log.error("❌ Token invalide pour envoi SMS");
+                    return;
+                }
+
+                String message = String.format(
+                        "📱 MISE À JOUR REQUISE\n\n" +
+                                "Décodeur: %s\n" +
+                                "Numéro utilisé: %s\n\n" +
+                                "Ce numéro a été fourni manuellement.\n" +
+                                "Veuillez le mettre à jour dans CGA Canal+.\n\n" +
+                                "Heure: %s",
+                        req.getNumAbonne(),
+                        req.getPhoneNumber(),
+                        LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
+                );
+
+                sendSmsToAdmins(token.getToken(), message);
+
+            } catch (Exception e) {
+                log.error("Erreur envoi SMS notification: {}", e.getMessage());
+            }
+        });
+    }
+
+
+    // SMS d'alerte 2FA amélioré
+    private void send2FAAlertSMSEnhanced(String accountUsername) {
+        smsExecutor.execute(() -> {
+            try {
+                TokenResponse token = orangeSmsService.getOAuthToken();
+                if (!isTokenValid(token)) {
+                    log.error("❌ Token invalide pour envoi SMS alerte 2FA");
+                    return;
+                }
+
+                String message = String.format(
+                        "🔐 ALERTE 2FA CANAL+\n\n" +
+                                "Compte bloqué par authentification double facteur:\n\n" +
+                                "Username: %s\n\n" +
+                                "ACTION URGENTE:\n" +
+                                "1. Connectez-vous à CGA Canal+\n" +
+                                "2. Utilisez Google Authenticator\n" +
+                                "3. Désactivez le 2FA pour ce compte\n\n" +
+                                "Heure: %s",
+                        accountUsername,
+                        LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
+                );
+
+                sendSmsToAdmins(token.getToken(), message);
+
+            } catch (Exception e) {
+                log.error("Erreur envoi SMS alerte 2FA: {}", e.getMessage());
+            }
+        });
+    }
+
+    // Méthode helper pour envoyer aux admins
+    private void sendSmsToAdmins(String token, String message) {
+        String[] adminNumbers = {"+224622459305", "+224621091895", "+224623761847"};
+
+        for (String number : adminNumbers) {
+            try {
+                orangeSmsService.sendSms(token, number, senderName, message);
+                log.info("📱 SMS envoyé à {}", number);
+                Thread.sleep(500); // Pause entre les envois
+            } catch (Exception e) {
+                log.error("Erreur envoi SMS à {}: {}", number, e.getMessage());
+            }
+        }
+    }
+
+    // Méthode scheduled pour nettoyer les comptes verrouillés expirés
+    @Scheduled(fixedDelay = 300000) // Toutes les 5 minutes
+    private void cleanupLockedAccounts() {
+        int beforeSize = accountsInUse.size();
+        accountsInUse.entrySet().removeIf(entry ->
+                LocalDateTime.now().isAfter(entry.getValue())
+        );
+        int removed = beforeSize - accountsInUse.size();
+        if (removed > 0) {
+            log.info("🧹 Nettoyage comptes verrouillés: {} comptes libérés", removed);
+        }
+    }
+
+
+
 
 
     // Nouvelle méthode pour créer une transaction sans user_id
@@ -1495,14 +1821,81 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
     private boolean performValidationWithConfirmation(WebDriver driver, JavascriptExecutor js, WebDriverWait wait) {
         try {
-            log.info("📋 Début de la validation avec détection PDF...");
+            log.info("📋 Début de la validation...");
+
+            // ⭐ MODE TEST - SIMULATION COMPLÈTE
+            if (paymentTestMode) {
+                log.warn("🧪 ============================================");
+                log.warn("🧪 MODE TEST ACTIVÉ - SIMULATION DE PAIEMENT");
+                log.warn("🧪 ============================================");
+
+                // Capturer l'état du formulaire même en mode test
+                try {
+                    String formState = (String) js.executeScript("""
+                    var form = {};
+                    var duration = document.querySelector('select[name="duration"]');
+                    var offer = document.querySelector('select[name="offer"]');
+                    var option = document.querySelector('select[name="option"]');
+                    
+                    if (duration) {
+                        form.duration = duration.value + ' = ' + duration.options[duration.selectedIndex].text;
+                    }
+                    if (offer) {
+                        form.offer = offer.value + ' = ' + offer.options[offer.selectedIndex].text;
+                    }
+                    if (option) {
+                        form.option = option.value + ' = ' + option.options[option.selectedIndex].text;
+                    }
+                    return JSON.stringify(form);
+                """);
+                    log.info("🧪 [TEST] Configuration capturée: {}", formState);
+                } catch (Exception e) {
+                    log.debug("🧪 [TEST] Pas de formulaire à capturer");
+                }
+
+                // Simuler les étapes de validation
+                log.info("🧪 [TEST] Étape 1: Recherche du bouton de validation...");
+                Thread.sleep(500);
+
+                log.info("🧪 [TEST] Étape 2: Clic simulé sur le bouton de validation");
+                Thread.sleep(1000);
+
+                log.info("🧪 [TEST] Étape 3: Attente de réponse du serveur Canal+...");
+                Thread.sleep(1500);
+
+                log.info("🧪 [TEST] Étape 4: Vérification du statut de paiement...");
+                Thread.sleep(1000);
+
+                log.info("🧪 [TEST] Étape 5: Génération de la facture PDF...");
+                Thread.sleep(500);
+
+                // Résultat de la simulation
+                String simulatedInvoiceId = "TEST_" + System.currentTimeMillis();
+                log.info("✅ [TEST] SIMULATION RÉUSSIE");
+                log.info("🧪 [TEST] Status HTTP: 200 OK");
+                log.info("🧪 [TEST] Facture simulée: /reports/frameset/{}.pdf", simulatedInvoiceId);
+                log.info("🧪 [TEST] Montant débité: 0 GNF (simulation)");
+                log.info("🧪 ============================================");
+
+                // Notification Slack
+                slackService.sendReabonnementProgress("TEST_MODE",
+                        "⚠️ PAIEMENT SIMULÉ - Aucun débit réel effectué");
+
+                // Retourner succès sans toucher au compte Canal+
+                return true;
+            }
+
+            // ⭐ MODE PRODUCTION - VALIDATION RÉELLE
+            log.info("💳 ============================================");
+            log.info("💳 MODE PRODUCTION - VALIDATION RÉELLE");
+            log.info("💳 ============================================");
 
             // Capturer l'état initial
             String urlBeforeValidation = driver.getCurrentUrl();
             int windowsBeforeValidation = driver.getWindowHandles().size();
             log.info("📍 État initial - URL: {}, Fenêtres: {}", urlBeforeValidation, windowsBeforeValidation);
 
-            // Capturer l'état du formulaire (optionnel)
+            // Capturer l'état du formulaire
             try {
                 String formState = (String) js.executeScript("""
                 var form = {};
@@ -1547,7 +1940,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             // ATTENTE AVEC DÉTECTION PDF PRIORITAIRE
             log.info("⏳ Attente de confirmation (PDF ou message)...");
 
-            int maxWaitSeconds = 20; // Réduit à 20s car le PDF arrive rapidement
+            int maxWaitSeconds = 20;
             boolean successConfirmed = false;
             boolean pdfConfirmed = false;
             boolean messageFound = false;
@@ -1562,7 +1955,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 if (!pdfConfirmed && driver.getWindowHandles().size() > windowsBeforeValidation) {
                     log.info("📄 Nouvel onglet détecté après {}s", i + 1);
 
-                    // Vérifier que c'est bien le PDF de facture
                     String originalWindow = driver.getWindowHandle();
                     for (String handle : driver.getWindowHandles()) {
                         if (!handle.equals(originalWindow)) {
@@ -1578,11 +1970,9 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                                 pdfConfirmed = true;
                                 successConfirmed = true;
 
-                                // Fermer l'onglet PDF
                                 driver.close();
                                 driver.switchTo().window(originalWindow);
 
-                                // SUCCÈS CONFIRMÉ PAR PDF - On peut sortir
                                 log.info("🎉 SUCCÈS CONFIRMÉ PAR OUVERTURE DE LA FACTURE PDF");
                                 break;
                             }
@@ -1592,13 +1982,12 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     }
 
                     if (pdfConfirmed) {
-                        // Attendre un peu pour stabilité puis sortir
                         Thread.sleep(1000);
-                        break; // Sortir de la boucle principale
+                        break;
                     }
                 }
 
-                // PRIORITÉ 2 : Message de succès (si présent)
+                // PRIORITÉ 2 : Message de succès
                 if (!messageFound && !successConfirmed) {
                     try {
                         WebElement successDiv = driver.findElement(By.className("operation-achieved-div"));
@@ -1609,7 +1998,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                                 messageFound = true;
                                 successConfirmed = true;
 
-                                // Cliquer sur Continuer si présent
                                 try {
                                     WebElement continueBtn = driver.findElement(
                                             By.cssSelector("button[data-cy='continue-validation']")
@@ -1636,7 +2024,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                     if (errorAlert.isDisplayed()) {
                         String errorText = errorAlert.getText();
 
-                        // Ignorer payment mean temporaire
                         if (!errorText.toLowerCase().contains("payment mean") &&
                                 !errorText.toLowerCase().contains("moyen de paiement")) {
 
@@ -1661,7 +2048,6 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                             pdfConfirmed ? "✅" : "❌");
                 }
 
-                // Arrêt anticipé si PDF confirmé
                 if (pdfConfirmed) {
                     log.info("✅ Validation confirmée par PDF après {}s", i + 1);
                     break;
@@ -1681,11 +2067,9 @@ public class ReabonnementServiceImpl implements ReabonnementService {
             // Dernière vérification avant échec
             String finalUrl = driver.getCurrentUrl();
 
-            // Si on est sur /subscribers ou /invoice sans erreur visible
             if ((finalUrl.contains("/subscribers") || finalUrl.contains("/invoice")) &&
                     !finalUrl.equals(urlBeforeValidation)) {
 
-                // Vérifier qu'il n'y a pas d'erreur
                 Boolean hasError = (Boolean) js.executeScript("""
                 return !!document.querySelector('#sas-alert:not([style*="none"])') ||
                        document.body.innerText.toLowerCase().includes('error') ||
@@ -1698,7 +2082,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 }
             }
 
-            log.error("❌ Échec validation - Aucune confirmation (PDF ou message) après {}s", maxWaitSeconds);
+            log.error("❌ Échec validation - Aucune confirmation après {}s", maxWaitSeconds);
             throw new RuntimeException("Aucune confirmation de paiement détectée");
 
         } catch (RuntimeException re) {
@@ -2207,7 +2591,8 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     }
 
     @Override
-    public Optional<Map<String, Object>> rechercherInfosAbonne(String numAbonne) {
+    public Optional<Map<String, Object>> rechercherInfosAbonne(String numAbonne)
+    {
         WebDriver driver = null;
         long startTime = System.currentTimeMillis();
         try {
@@ -2689,6 +3074,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
         }
     }
 
+    @Override
     public Map<String, Object> getAccountsStatus() {
         Map<String, Object> status = new HashMap<>();
 
@@ -2697,8 +3083,10 @@ public class ReabonnementServiceImpl implements ReabonnementService {
 
             status.put("total_accounts", allAccounts.size());
             status.put("blocked_by_2fa", blocked2FAAccounts.size());
-            status.put("available_now", allAccounts.size() - blocked2FAAccounts.size());
+            status.put("in_use", accountsInUse.size());
+            status.put("available_now", allAccounts.size() - blocked2FAAccounts.size() - accountsInUse.size());
 
+            // Détails des comptes bloqués par 2FA
             List<Map<String, Object>> blockedDetails = new ArrayList<>();
             blocked2FAAccounts.forEach((username, blockedUntil) -> {
                 Map<String, Object> detail = new HashMap<>();
@@ -2706,9 +3094,24 @@ public class ReabonnementServiceImpl implements ReabonnementService {
                 detail.put("blocked_until", blockedUntil.toString());
                 detail.put("minutes_remaining",
                         Duration.between(LocalDateTime.now(), blockedUntil).toMinutes());
+                detail.put("reason", "2FA");
                 blockedDetails.add(detail);
             });
+
+            // Détails des comptes en cours d'utilisation
+            List<Map<String, Object>> inUseDetails = new ArrayList<>();
+            accountsInUse.forEach((username, lockedUntil) -> {
+                Map<String, Object> detail = new HashMap<>();
+                detail.put("username", username);
+                detail.put("locked_until", lockedUntil.toString());
+                detail.put("minutes_remaining",
+                        Duration.between(LocalDateTime.now(), lockedUntil).toMinutes());
+                detail.put("reason", "IN_USE");
+                inUseDetails.add(detail);
+            });
+
             status.put("blocked_accounts_details", blockedDetails);
+            status.put("in_use_accounts_details", inUseDetails);
 
         } catch (Exception e) {
             log.error("Erreur récupération statut comptes: {}", e.getMessage());
