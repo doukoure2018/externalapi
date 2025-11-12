@@ -71,6 +71,7 @@ public class ReabonnementServiceImpl implements ReabonnementService {
     @Value("${slack.credential}")
     private String slackCredential;
 
+    // this is where to change
     @Value("${payment.test.mode:false}")
     private boolean paymentTestMode;
 
